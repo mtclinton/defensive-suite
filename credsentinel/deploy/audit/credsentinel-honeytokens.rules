@@ -1,0 +1,27 @@
+## credsentinel — auditd watch rules for the deployed honeytoken decoys.
+##
+## credsentinel SHIPS these rules but NEVER loads them into the kernel. Install
+## them yourself after review (see deploy/README.md). Loading audit rules modifies
+## kernel audit state and is a privileged operation.
+##
+## WHY a second tripwire: credsentinel's primary trip signal is the decoy's atime
+## advancing (something read it). An attacker who mounts the filesystem `noatime`,
+## or copies the decoy with an atime-preserving tool, can defeat the atime check.
+## An auditd read watch (-p r) records the read at the syscall level, independent
+## of atime, and names the reading process. A read of any decoy below is a
+## near-zero-false-positive breach indicator → assume compromise, rotate from a
+## clean device, escalate to bpfsentry's offline check.
+##
+## PATHS: these are the DEFAULT decoy locations (HoneytokenDir = the home dir).
+## Replace `/home/CHANGEME` with the real user's home, OR generate this file for
+## the exact deployed paths straight from the manifest:
+##
+##     credsentinel deploy ...            # writes the manifest
+##     # then emit per-decoy auditctl lines from the recorded paths:
+##     #   honeytoken.AuditdRules(manifest)   (the same lines, exact paths)
+##
+## auditd resolves -w paths at load time, so each must exist (deploy first).
+
+-w /home/CHANGEME/.aws/credentials.bak -p rwa -k credsentinel_honeytoken
+-w /home/CHANGEME/.kube/decoy.kubeconfig -p rwa -k credsentinel_honeytoken
+-w /home/CHANGEME/.config/app/.env.decoy -p rwa -k credsentinel_honeytoken

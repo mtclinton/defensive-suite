@@ -1,0 +1,5 @@
+{
+  "_comment": "Optional input to the release-age cooldown: map each pinned name@version to its registry publish timestamp (RFC3339). instguard compares these against an injected 'now' with a pure function, so the cooldown needs no registry network access. Generate from `npm view <pkg> time` or your registry mirror's metadata. Entries with no matching pinned version are ignored.",
+  "left-pad@1.3.0": "2018-04-12T00:00:00Z",
+  "some-fresh-pkg@9.9.9": "2026-06-18T08:30:00Z"
+}

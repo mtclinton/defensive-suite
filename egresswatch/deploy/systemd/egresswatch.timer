@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the egresswatch BPFDoor triage + egress scan periodically
+Documentation=https://github.com/mtclinton/defensive-suite
+
+[Timer]
+# Every 15 minutes with jitter so a fleet does not stampede the collector. The
+# triage scan is cheap (<3% CPU on a 5950X per the design); a short interval
+# narrows the window in which a passive backdoor sits undetected between runs.
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=2min
+Persistent=true
+Unit=egresswatch.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+{
+  "webhook_url": "https://collector.example.internal/ingest/credsentinel",
+
+  "scan_roots": [
+    "~/src",
+    "~/work"
+  ],
+  "scan_targets": true,
+
+  "honeytoken_dir": "~",
+  "manifest_path": "~/.config/credsentinel/honeytokens.json",
+
+  "max_file_bytes": 4194304,
+
+  "_comment_scan_roots": "Do NOT add a bare \"~\" here: a blanket home walk makes gitleaks/trufflehog read the planted honeytoken decoys (~/.aws/credentials.bak, ~/.kube/decoy.kubeconfig, ~/.env), advancing their atime and self-tripping the honeytoken watch. List specific code roots instead; the stealer-target credential files are covered by scan_targets.",
+  "_comment_secrets": "The webhook Authorization token and the Canarytoken DNS host are env-only and are NEVER read from this file: set CREDSENTINEL_WEBHOOK_AUTH and CREDSENTINEL_CANARY_HOST in the environment (e.g. /etc/credsentinel/credsentinel.env, mode 0600)."
+}

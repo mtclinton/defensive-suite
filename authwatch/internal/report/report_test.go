@@ -1,0 +1,184 @@
+package report
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestSeverityJSONRoundTrip(t *testing.T) {
+	for _, s := range []Severity{SeverityInfo, SeverityLow, SeverityMedium, SeverityHigh, SeverityCritical} {
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got Severity
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got != s {
+			t.Errorf("round trip %v -> %v", s, got)
+		}
+	}
+}
+
+func TestSeverityUnmarshalUnknown(t *testing.T) {
+	var s Severity
+	if err := json.Unmarshal([]byte(`"bogus"`), &s); err == nil {
+		t.Error("expected error for unknown severity")
+	}
+}
+
+func TestSummarizeCleanThreshold(t *testing.T) {
+	tests := []struct {
+		sev   Severity
+		clean bool
+	}{
+		{SeverityInfo, true}, {SeverityLow, true},
+		{SeverityMedium, false}, {SeverityHigh, false}, {SeverityCritical, false},
+	}
+	for _, tc := range tests {
+		r := New("authwatch", "h", "rpm", time.Unix(0, 0), []Finding{{Severity: tc.sev}})
+		if r.Summary.Clean != tc.clean {
+			t.Errorf("sev %v clean=%v want %v", tc.sev, r.Summary.Clean, tc.clean)
+		}
+		wantExit := 0
+		if !tc.clean {
+			wantExit = 2
+		}
+		if r.ExitCode() != wantExit {
+			t.Errorf("sev %v exit=%d want %d", tc.sev, r.ExitCode(), wantExit)
+		}
+	}
+}
+
+func TestSummarizeCounts(t *testing.T) {
+	r := New("a", "h", "", time.Unix(0, 0), []Finding{
+		{Severity: SeverityInfo}, {Severity: SeverityInfo}, {Severity: SeverityHigh},
+	})
+	if r.Summary.Total != 3 {
+		t.Errorf("total=%d", r.Summary.Total)
+	}
+	if r.Summary.BySeverity["info"] != 2 || r.Summary.BySeverity["high"] != 1 {
+		t.Errorf("bySeverity=%v", r.Summary.BySeverity)
+	}
+	if r.Summary.Worst != SeverityHigh {
+		t.Errorf("worst=%v", r.Summary.Worst)
+	}
+}
+
+func TestNewEmptyFindingsNonNil(t *testing.T) {
+	r := New("authwatch", "h", "", time.Unix(0, 0), nil)
+	if r.Findings == nil {
+		t.Error("findings should be non-nil for clean JSON output")
+	}
+	if !r.Summary.Clean {
+		t.Error("empty run should be clean")
+	}
+}
+
+func TestEmitJournalPriorityPrefixes(t *testing.T) {
+	r := New("authwatch", "h", "rpm", time.Unix(0, 0), []Finding{
+		{Check: "pam", Severity: SeverityCritical, Title: "unowned", Path: "/p", Technique: "T1556.003"},
+		{Check: "a", Severity: SeverityInfo, Title: "ok"},
+	})
+	var buf bytes.Buffer
+	if err := EmitJournal(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"<2>authwatch[pam]", "<6>authwatch[a]", "path=/p", "technique=T1556.003", "[summary]"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("journal missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestEmitWebhookPostsJSON(t *testing.T) {
+	var body []byte
+	var auth, ctype string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ = io.ReadAll(req.Body)
+		auth = req.Header.Get("Authorization")
+		ctype = req.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	r := New("authwatch", "h", "rpm", time.Unix(0, 0), []Finding{{Check: "pam", Severity: SeverityHigh, Title: "x"}})
+	if err := EmitWebhook(context.Background(), srv.Client(), srv.URL, "Bearer t0k", r); err != nil {
+		t.Fatal(err)
+	}
+	if auth != "Bearer t0k" {
+		t.Errorf("auth=%q", auth)
+	}
+	if ctype != "application/json" {
+		t.Errorf("content-type=%q", ctype)
+	}
+	var decoded Report
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if decoded.Tool != "authwatch" || len(decoded.Findings) != 1 {
+		t.Errorf("decoded=%+v", decoded)
+	}
+}
+
+func TestEmitWebhookEmptyURLIsNoop(t *testing.T) {
+	if err := EmitWebhook(context.Background(), nil, "", "", New("a", "h", "", time.Unix(0, 0), nil)); err != nil {
+		t.Errorf("empty url should be no-op, got %v", err)
+	}
+}
+
+func TestEmitWebhookErrorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	if err := EmitWebhook(context.Background(), srv.Client(), srv.URL, "", New("a", "h", "", time.Unix(0, 0), nil)); err == nil {
+		t.Error("expected error on HTTP 500")
+	}
+}
+
+func TestEmitWebhookRefusesRedirect(t *testing.T) {
+	followed := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		followed = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, target.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	err := EmitWebhook(context.Background(), redirector.Client(), redirector.URL, "Bearer secret",
+		New("authwatch", "h", "", time.Unix(0, 0), nil))
+	if err == nil {
+		t.Error("a redirect from the collector should surface as an error, not be followed")
+	}
+	if followed {
+		t.Error("authwatch followed the redirect — the token and report would leak")
+	}
+}
+
+func TestEmitJournalSanitizesControlChars(t *testing.T) {
+	r := New("authwatch", "h", "rpm", time.Unix(0, 0), []Finding{
+		{Check: "pam", Severity: SeverityHigh, Title: "t",
+			Path: "/tmp/evil\n<2>authwatch[forged] critical: injected record"},
+	})
+	var buf bytes.Buffer
+	if err := EmitJournal(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 { // one finding line + one summary line, no forged third
+		t.Errorf("control char in Path forged extra line(s); got %d lines:\n%s", len(lines), buf.String())
+	}
+}

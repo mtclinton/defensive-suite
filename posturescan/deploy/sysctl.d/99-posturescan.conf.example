@@ -1,0 +1,28 @@
+# 99-posturescan.conf — EXAMPLE drop-in (ARTIFACT, NOT installed)
+#
+# This is what `posturescan remediate` generates for a host that is fully
+# drifted. posturescan NEVER writes this file and NEVER runs sysctl — it prints
+# this content for you to review and apply yourself. Copy it to
+# /etc/sysctl.d/99-posturescan.conf only after review, then `sudo sysctl
+# --system` to load it.
+#
+# The values below are the goal state from DESIGN.md / deploy/profiles.
+
+# bpf() attack surface — disable+lock unprivileged bpf() (eBPF-rootkit primitive)
+kernel.unprivileged_bpf_disabled = 2
+
+# ptrace scope — the ssh-keysign-pwn race fix (admin-only ptrace)
+kernel.yama.ptrace_scope = 2
+
+# hide kernel pointers from unprivileged readers
+kernel.kptr_restrict = 2
+
+# restrict dmesg to privileged users
+kernel.dmesg_restrict = 1
+
+# no further module loads (optional; breaks late module loading)
+kernel.modules_disabled = 1
+
+# --- NOT settable here (boot-time only) ---
+# kernel lockdown:   add `lockdown=confidentiality` to the kernel cmdline
+# module signing:    add `module.sig_enforce=1` to the kernel cmdline

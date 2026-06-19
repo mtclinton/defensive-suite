@@ -1,0 +1,13 @@
+{
+  "webhook_url": "https://collector.example.internal/ingest/instguard",
+  "project_dir": "/srv/project",
+  "osv_query_url": "https://api.osv.dev/v1/query",
+  "cooldown_days": 3,
+  "npm_logs_dir": "",
+  "aur_paths": [
+    "PKGBUILD",
+    "*.install",
+    "*.hook"
+  ],
+  "offline_osv": false
+}

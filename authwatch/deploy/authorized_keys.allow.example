@@ -1,0 +1,15 @@
+# authwatch authorized_keys allowlist.
+#
+# One entry per line, each either:
+#   - an OpenSSH SHA256 fingerprint (as printed by `ssh-keygen -lf <pubkey>`), or
+#   - a full public-key line (authwatch computes its fingerprint).
+#
+# Any authorized_keys entry whose fingerprint is NOT listed here is reported as
+# an unattributable key (T1098.004). Keep this file on the off-host trust anchor
+# or otherwise read-only, and regenerate it deliberately when you add a key.
+
+# Fingerprint form:
+SHA256:n0tAr3alF1ngerpr1ntJustShowingTheFormatHere000000000000
+
+# Full public-key form:
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAEXAMPLEonlyNOTaRealKey00000000000 max@trusted-laptop

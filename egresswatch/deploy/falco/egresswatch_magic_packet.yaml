@@ -1,0 +1,47 @@
+# egresswatch — Falco rule for the BPFDoor/Symbiote magic-packet signature.
+#
+# The signature is a process attaching a classic BPF filter to a raw / AF_PACKET
+# socket via setsockopt(SOL_SOCKET, SO_ATTACH_FILTER, ...) so it can passively
+# sniff for a magic activation packet without holding a listening port. Sysdig
+# has published a comparable rule; this is the egresswatch-tuned version.
+#
+# egresswatch SHIPS this rule; it does NOT install Falco or load the rule. Review
+# it, then load it into your Falco deployment (see deploy/README.md). The same
+# signature is covered offline by `egresswatch triage` and live (without Falco)
+# by the `egresswatch sensor` eBPF program in deploy/../bpf/.
+#
+# Requires the Falco modern-eBPF or kmod driver (the setsockopt syscall and its
+# args are exposed by the syscall source).
+
+- required_engine_version: 0.31.0
+
+# SO_ATTACH_FILTER == 26, SO_ATTACH_REUSEPORT_CBPF == 51 (uapi socket.h).
+# Falco renders setsockopt optname as the symbolic name where it can; match both
+# the symbolic form and the raw numeric form for driver/version robustness.
+- macro: attach_cbpf_filter
+  condition: >
+    evt.type = setsockopt and evt.dir = <
+    and (evt.arg.optname in (SO_ATTACH_FILTER, SO_ATTACH_REUSEPORT_CBPF)
+         or evt.arg.optname in ("26", "51"))
+
+# A short allowlist of programs that legitimately attach CBPF filters to packet
+# sockets (DHCP clients, tcpdump/libpcap, the kernel's own tooling). Tune to your
+# host: the BPFDoor value is in what is NOT on this list.
+- list: known_cbpf_users
+  items: [dhclient, dhcpcd, NetworkManager, tcpdump, wireshark, dumpcap, tshark, systemd-network]
+
+- rule: BPF filter attached to packet socket (BPFDoor signature)
+  desc: >
+    A process attached a classic BPF filter to a socket via SO_ATTACH_FILTER.
+    On a raw/AF_PACKET socket this is the BPFDoor/Symbiote magic-packet backdoor
+    pattern: passive, portless sniffing for an activation packet. Benign packet
+    sniffers (DHCP, tcpdump) also do this and are allowlisted below.
+  condition: >
+    attach_cbpf_filter
+    and not proc.name in (known_cbpf_users)
+  output: >
+    CBPF filter attached to a socket (possible BPFDoor magic-packet backdoor)
+    (proc=%proc.name pid=%proc.pid ppid=%proc.ppid exe=%proc.exepath
+     cmd=%proc.cmdline user=%user.name optname=%evt.arg.optname container=%container.id)
+  priority: CRITICAL
+  tags: [network, mitre_command_and_control, T1205.002, bpfdoor, egresswatch]

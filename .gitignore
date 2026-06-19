@@ -1,0 +1,13 @@
+# Keep the public repo free of toolchain tells (see SETUP.md).
+/CLAUDE.md
+/.claude/
+
+# Build artifacts
+bin/
+dist/
+*.test
+*.out
+
+# Python bytecode (bpfsentry/forensics)
+__pycache__/
+*.pyc

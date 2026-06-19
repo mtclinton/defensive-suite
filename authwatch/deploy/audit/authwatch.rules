@@ -1,0 +1,23 @@
+## authwatch — auditd watch rules for the Linux trust path.
+##
+## authwatch SHIPS these rules but never loads them into the kernel. Install them
+## yourself after review (see deploy/README.md). `authwatch check` reads the loaded
+## ruleset via `auditctl -l` and reports any of the core watches below that are
+## missing (reduced visibility / possible T1562.001).
+##
+## The four core watches mirror authwatch/internal/auditd ExpectedWatches.
+
+## --- core trust-path watches ---
+-w /etc/ld.so.preload -p wa -k authwatch_ldpreload
+-w /etc/pam.d/ -p wa -k authwatch_pam
+-w /etc/ssh/sshd_config -p wa -k authwatch_sshd
+-w /root/.ssh/ -p wa -k authwatch_rootssh
+
+## --- PAM module directories (RPM + Debian-multiarch; a missing path is harmless) ---
+-w /lib/security/ -p wa -k authwatch_pam
+-w /lib64/security/ -p wa -k authwatch_pam
+-w /usr/lib64/security/ -p wa -k authwatch_pam
+-w /usr/lib/x86_64-linux-gnu/security/ -p wa -k authwatch_pam
+
+## --- OpenSSH host config directory ---
+-w /etc/ssh/ -p wa -k authwatch_sshd

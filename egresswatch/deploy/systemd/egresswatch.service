@@ -1,0 +1,55 @@
+[Unit]
+Description=egresswatch — BPFDoor/Symbiote triage + egress-allowlist scan
+Documentation=https://github.com/mtclinton/defensive-suite
+
+[Service]
+Type=oneshot
+# `egresswatch scan` reads /proc (every PID's fd/exe/stack/maps, /proc/net/*),
+# the known mutex-file paths, and the egress allowlist, then reports. It is a
+# read-only auditor: it never loads eBPF, never changes sysctls, never writes
+# system state. CAP_DAC_READ_SEARCH lets it read other users' /proc/<pid>/fd and
+# /proc/<pid>/stack without running fully unconfined.
+ExecStart=/usr/local/bin/egresswatch scan --config /etc/egresswatch/config.json
+# The webhook auth token comes from the environment, never the config file.
+EnvironmentFile=-/etc/egresswatch/egresswatch.env
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=120
+
+# --- privilege reduction ---
+NoNewPrivileges=true
+# CAP_DAC_READ_SEARCH: read any process's /proc entries (fd symlinks, stack).
+# CAP_SYS_PTRACE is NOT requested — /proc/<pid>/stack reads degrade gracefully.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+UMask=0077
+
+# --- filesystem: read-only audit ---
+ProtectSystem=strict
+ProtectHome=read-only
+# egresswatch writes nothing; no ReadWritePaths carve-out is needed.
+PrivateTmp=false
+
+# --- kernel / namespace hardening ---
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# AF_INET/AF_INET6 are needed only for the optional webhook POST; AF_UNIX for
+# journald; AF_NETLINK for the `-conn-source ss` path (ss -tunp opens a
+# NETLINK_SOCK_DIAG socket). No AF_PACKET — egresswatch detects packet sockets,
+# it never opens one.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot
+
+[Install]
+WantedBy=multi-user.target

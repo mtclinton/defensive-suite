@@ -1,0 +1,6 @@
+{
+  "webhook_url": "https://collector.example.internal/ingest/egresswatch",
+  "proc_dir": "/proc",
+  "allowlist_path": "/etc/egresswatch/egress.allow.json",
+  "conn_source": "proc"
+}

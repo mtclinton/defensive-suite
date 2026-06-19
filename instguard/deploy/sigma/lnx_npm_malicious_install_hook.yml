@@ -1,0 +1,49 @@
+title: Malicious npm Install-Hook Execution Pattern
+id: 7f2b6c41-9d3e-4a18-b5c2-6e8a1d4f0c73
+status: experimental
+description: |
+  Detects the install-time RCE pattern that defines the Mastra/Shai-Hulud,
+  IronWorm and Miasma npm waves: a package lifecycle script (preinstall /
+  install / postinstall / prepare) that pipes a remote download into a shell,
+  runs `node -e` / `eval`, decodes a base64/atob blob into code, or disables TLS
+  verification (NODE_TLS_REJECT_UNAUTHORIZED=0). instguard's `hooks` check flags
+  these statically from package.json before install; this rule catches the same
+  command shapes at runtime if a hook is ever allowed to execute (e.g. a bare
+  `npm install` without --ignore-scripts). Pairs with an instguard BLOCK verdict.
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/004/
+  - https://github.com/mtclinton/defensive-suite/tree/main/instguard
+author: defensive-suite/instguard
+date: 2026-06-19
+tags:
+  - attack.initial_access
+  - attack.execution
+  - attack.t1195.002
+  - attack.t1059.004
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  parent_is_npm_lifecycle:
+    ParentCommandLine|contains:
+      - 'npm'
+      - 'node'
+      - 'pnpm'
+      - 'yarn'
+  curl_pipe_shell:
+    CommandLine|re: '(?i)\b(curl|wget|fetch)\b.*\|.*\b(sh|bash|zsh|node|python)\b'
+  node_eval:
+    CommandLine|contains:
+      - 'node -e'
+      - 'eval('
+  base64_decode_exec:
+    CommandLine|re: '(?i)\bbase64\b.*\s(-d|--decode)\b.*\|.*\b(sh|bash|node)\b'
+  tls_disabled:
+    CommandLine|contains: 'NODE_TLS_REJECT_UNAUTHORIZED=0'
+  condition: parent_is_npm_lifecycle and (curl_pipe_shell or node_eval or base64_decode_exec or tls_disabled)
+falsepositives:
+  - A small number of legitimate native-module build scripts fetch toolchains.
+    Correlate with the package name and an instguard verdict before escalating;
+    a SAFE/REVIEW verdict with a known build tool is the benign case.
+level: high

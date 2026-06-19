@@ -1,0 +1,39 @@
+[Unit]
+Description=bpfsentry — re-enumerate live BPF and diff against the early-boot allowlist
+Documentation=https://github.com/mtclinton/defensive-suite
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Diff the live bpftool view against the off-host allowlist. Optionally ingest an
+# out-of-band enumeration (last night's prog_idr walk, produced by forensics/)
+# with --oob to surface programs hidden from the live kernel.
+ExecStart=/usr/local/bin/bpfsentry diff --config /etc/bpfsentry/config.json
+EnvironmentFile=-/etc/bpfsentry/bpfsentry.env
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=120
+
+# --- privilege reduction (read-only audit; bpftool needs BPF caps) ---
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+UMask=0077
+ProtectSystem=strict
+ProtectHome=read-only
+# The allowlist and any --oob input are read-only inputs; bpfsentry writes
+# nothing during a diff. No ReadWritePaths needed.
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

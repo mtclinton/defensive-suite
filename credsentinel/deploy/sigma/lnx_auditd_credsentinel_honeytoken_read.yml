@@ -1,0 +1,33 @@
+title: Credential Honeytoken Decoy Accessed
+id: 7c2e9b41-5d6a-4f83-9e21-3b8a7c4d1f60
+status: experimental
+description: |
+  Detects a read or write of a credsentinel honeytoken decoy credential file
+  (the fake AWS key in ~/.aws/credentials.bak, the decoy kubeconfig, or the fake
+  .env carrying a DNS token). No legitimate process touches a decoy credential,
+  so any access is a near-zero-false-positive breach indicator: a credential
+  stealer (atomic-lockfile preinstall ELF, QLNX, easy-day-js stage two) walking
+  the credential file list will read the decoy and trip this rule. Pairs with the
+  credsentinel auditd watch `credsentinel_honeytoken` and with credsentinel's own
+  atime-based trip detection (this is the kernel-level, noatime-proof second leg).
+references:
+  - https://attack.mitre.org/techniques/T1552/001/
+  - https://github.com/mtclinton/defensive-suite/tree/main/credsentinel
+author: defensive-suite/credsentinel
+date: 2026-06-19
+tags:
+  - attack.credential_access
+  - attack.collection
+  - attack.t1552.001
+logsource:
+  product: linux
+  service: auditd
+detection:
+  honeytoken_access:
+    key: 'credsentinel_honeytoken'
+  condition: honeytoken_access
+falsepositives:
+  - A backup tool or anti-virus reading the decoy. Decoys are placed and named so
+    no routine tooling should touch them; investigate the reading process (auid,
+    exe) before dismissing — a trip should be treated as compromise by default.
+level: critical

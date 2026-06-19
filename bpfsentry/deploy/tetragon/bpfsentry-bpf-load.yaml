@@ -1,0 +1,59 @@
+# bpfsentry — Tetragon TracingPolicy: alert (and optionally kill) on eBPF program
+# loads from processes that are NOT on the legitimate-loader allowlist.
+#
+# Layer 2 of the design (load-time alerting): a rootkit must call bpf(BPF_PROG_LOAD)
+# to install itself; Tetragon's kprobe on the load path catches it at that moment,
+# BEFORE it hooks sys_bpf and hides. The allowlist below is the set of binaries
+# that legitimately load eBPF on a hardened workstation — tune it to YOUR agents.
+#
+# SHIPPED, NOT LOADED. Loading a TracingPolicy changes kernel tracing state.
+# Apply it yourself after review:  kubectl apply -f bpfsentry-bpf-load.yaml
+# (k8s/Cilium) or  tetra tracingpolicy add bpfsentry-bpf-load.yaml  (standalone).
+#
+# The enforcement (SIGKILL) action is commented out by default — enable it only
+# once the allowlist is proven not to kill a legitimate loader on YOUR host.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: "bpfsentry-bpf-load"
+spec:
+  kprobes:
+    # security_bpf_prog_load is the LSM hook on the program-load path; on kernels
+    # without it, fall back to the bpf_check verifier entry (see the second probe).
+    - call: "security_bpf_prog_load"
+      syscall: false
+      # No arg selectors needed — we match on the loading process, not the prog.
+      selectors:
+        - matchBinaries:
+            # Anything NOT in this list that loads a BPF program is suspicious.
+            - operator: "NotIn"
+              values:
+                - "/usr/local/bin/bpfsentry"
+                - "/usr/bin/bpftool"
+                - "/usr/sbin/bpftool"
+                - "/usr/bin/cilium-agent"
+                - "/usr/bin/tetragon"
+                - "/opt/cilium/cilium-agent"
+                # add YOUR EDR / tracer binary paths here
+          matchActions:
+            - action: Post
+            # --- ENFORCEMENT (review before enabling) ---
+            # Uncomment to kill an unauthorized loader the instant it loads a
+            # program. Test against your real agents first; a false positive here
+            # kills a legitimate security agent.
+            # - action: Sigkill
+    # Fallback for kernels lacking the LSM hook: the verifier entry point.
+    - call: "bpf_check"
+      syscall: false
+      selectors:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/local/bin/bpfsentry"
+                - "/usr/bin/bpftool"
+                - "/usr/sbin/bpftool"
+                - "/usr/bin/cilium-agent"
+                - "/usr/bin/tetragon"
+                - "/opt/cilium/cilium-agent"
+          matchActions:
+            - action: Post

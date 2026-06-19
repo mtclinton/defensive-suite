@@ -1,0 +1,56 @@
+[Unit]
+Description=bpfsentry — capture the early-boot BPF allowlist before third-party agents load
+Documentation=https://github.com/mtclinton/defensive-suite
+# THE WHOLE POINT: run before any third-party agent or implant loads BPF, so the
+# allowlist reflects only the programs the *base* system loads. Order before the
+# units that load eBPF (Cilium, Tetragon, your EDR) and as early as the BPF
+# filesystem and the network are up enough to read program metadata.
+DefaultDependencies=no
+After=sysinit.target local-fs.target
+Before=cilium.service tetragon.service network-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Capture the allowlist to the OFF-HOST trust anchor. The path is a read-only
+# mount everywhere except this one early-boot window; if it is writable on the
+# box after capture, a rootkit rewrites it and the diff is worthless.
+ExecStart=/usr/local/bin/bpfsentry baseline --config /etc/bpfsentry/config.json
+EnvironmentFile=-/etc/bpfsentry/bpfsentry.env
+TimeoutStartSec=60
+
+# --- privilege reduction ---
+# bpfsentry shells out to bpftool, which needs CAP_BPF + CAP_PERFMON (and
+# CAP_SYS_ADMIN on older kernels) to enumerate programs/maps/links. It writes
+# only the allowlist file and otherwise reads.
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+UMask=0077
+
+ProtectSystem=strict
+ProtectHome=true
+# Narrow writable carve-out for the allowlist output. /mnt/trust-anchor is where
+# the shipped config.example.json writes baseline_path (the off-host anchor,
+# bind-mounted there and writable only during this early-boot window — see
+# deploy/README.md). /var/lib/bpfsentry is the on-host fallback for deployments
+# that point baseline_path at a local path. Both are listed so ProtectSystem=strict
+# does not EROFS the layer-1 trust-anchor capture. Keep this in sync with
+# baseline_path in config.json.
+ReadWritePaths=/mnt/trust-anchor /var/lib/bpfsentry
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# NOTE: MemoryDenyWriteExecute is intentionally OFF — the BPF verifier/JIT path
+# can require W^X-incompatible mappings on some kernels when bpftool loads BTF.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=sysinit.target

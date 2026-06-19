@@ -1,0 +1,32 @@
+title: Modification Of ld.so.preload
+id: b7d8e0a2-6f3c-4f9e-9b1a-2c5d4e8f1a30
+status: stable
+description: |
+  Detects write/attribute changes to /etc/ld.so.preload, the dynamic linker's
+  global preload list. Populating it forces every dynamically linked process to
+  load an attacker .so (LD_PRELOAD persistence / userland hooking), as used by the
+  QLNX RAT and the Symbiote lineage. Pairs with the authwatch audit watch
+  `authwatch_ldpreload`.
+references:
+  - https://attack.mitre.org/techniques/T1574/006/
+  - https://github.com/mtclinton/defensive-suite/tree/main/authwatch
+author: defensive-suite/authwatch
+date: 2026-06-19
+tags:
+  - attack.persistence
+  - attack.privilege_escalation
+  - attack.t1574.006
+logsource:
+  product: linux
+  service: auditd
+detection:
+  modification:
+    type: 'PATH'
+    name: '/etc/ld.so.preload'
+  audit_key:
+    key: 'authwatch_ldpreload'
+  condition: modification or audit_key
+falsepositives:
+  - A small number of monitoring/security agents legitimately use ld.so.preload;
+    correlate the writing process and the package manager before escalating.
+level: high

@@ -1,0 +1,26 @@
+{
+  "webhook_url": "https://collector.example.internal/ingest/posturescan",
+
+  "proc_sys_root": "/proc/sys",
+  "lockdown_path": "/sys/kernel/security/lockdown",
+  "profile_path": "/etc/posturescan/hardening-target.conf",
+
+  "systemd_dirs": [
+    "/etc/systemd/system",
+    "/usr/lib/systemd/system",
+    "/run/systemd/system"
+  ],
+  "container_specs": [],
+  "legit_bpf_tools": [
+    "tetragon",
+    "cilium",
+    "falco",
+    "bpfsentry",
+    "egresswatch"
+  ],
+
+  "sysctl_dropin_path": "/etc/sysctl.d/99-posturescan.conf",
+
+  "oscap_datastream": "",
+  "oscap_profile": ""
+}

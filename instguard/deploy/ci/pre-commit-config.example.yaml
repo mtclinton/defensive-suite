@@ -1,0 +1,16 @@
+# Example .pre-commit-config.yaml entry wiring instguard as a local hook.
+# Copy this block into your repo's .pre-commit-config.yaml (https://pre-commit.com).
+#
+# The hook runs the static gate on every commit that touches a manifest/lockfile,
+# blocking the commit if instguard returns a BLOCK verdict. It never installs or
+# executes any package — it only reads files and (optionally) queries OSV.dev.
+repos:
+  - repo: local
+    hooks:
+      - id: instguard
+        name: instguard supply-chain gate
+        entry: sh deploy/ci/instguard-gate.sh
+        language: system
+        pass_filenames: false
+        # Only run when a manifest or lockfile changes.
+        files: '(^|/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|PKGBUILD|.*\.install|.*\.hook)$'

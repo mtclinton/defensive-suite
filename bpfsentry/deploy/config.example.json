@@ -1,0 +1,19 @@
+{
+  "webhook_url": "https://collector.example.internal/ingest/bpfsentry",
+  "baseline_path": "/mnt/trust-anchor/bpfsentry-allowlist.json",
+  "bpftool_path": "bpftool",
+
+  "allowed_loaders": [
+    "cil_from_netdev",
+    "cil_to_netdev",
+    "tetragon",
+    "generic_kprobe"
+  ],
+
+  "suspicious_helpers": [
+    "bpf_override_return",
+    "bpf_probe_write_user",
+    "bpf_send_signal",
+    "bpf_send_signal_thread"
+  ]
+}

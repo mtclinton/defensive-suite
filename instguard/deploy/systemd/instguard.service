@@ -1,0 +1,55 @@
+[Unit]
+Description=instguard — supply-chain install-time guard (lockfile drift / MAL- advisories)
+Documentation=https://github.com/mtclinton/defensive-suite
+
+[Service]
+Type=oneshot
+# Periodically vet a configured project: lockfile drift, dangerous install hooks,
+# OSV MAL- advisories on pinned versions, release-age cooldown, AUR build files.
+# This is a *scheduled scan*; it never installs, builds, or runs any package
+# script. --no-webhook is NOT set so verdicts reach the collector.
+ExecStart=/usr/local/bin/instguard check --config /etc/instguard/config.json
+# The webhook auth token comes from the environment, never the config file.
+EnvironmentFile=-/etc/instguard/instguard.env
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=120
+# A BLOCK verdict exits 1 and a medium finding exits 2; both are "the scan found
+# something", not a unit failure, so do not let them spam OnFailure here. The
+# collector/webhook is the alert path. SuccessExitStatus keeps the unit green.
+SuccessExitStatus=0 1 2
+
+# --- privilege reduction: instguard only reads project files + queries OSV ---
+DynamicUser=true
+NoNewPrivileges=true
+UMask=0077
+
+# --- filesystem: read-only everywhere except a scratch dir; project is RO ---
+ProtectSystem=strict
+ProtectHome=true
+# The project to scan is mounted read-only; set this to your project path.
+# instguard never writes to it.
+ReadOnlyPaths=/srv/project
+PrivateTmp=true
+
+# --- kernel / namespace hardening ---
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# AF_INET/AF_INET6 are required for the OSV.dev HTTPS query; AF_UNIX for resolver.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot
+
+[Install]
+WantedBy=multi-user.target

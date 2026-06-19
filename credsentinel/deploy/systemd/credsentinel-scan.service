@@ -1,0 +1,53 @@
+[Unit]
+Description=credsentinel — secret-exposure scan (gitleaks + TruffleHog + built-in fallback) and honeytoken watch
+Documentation=https://github.com/mtclinton/defensive-suite
+
+[Service]
+Type=oneshot
+# credsentinel reads the user's repos, home directory, and the exact credential
+# files stealers walk (.npmrc, .aws/credentials, .kube/config, SSH keys, Vault
+# tokens, …) and shells out to gitleaks/trufflehog. It only ever READS and
+# REPORTS; the scan never writes the home dir or modifies the system. Run it as
+# the workstation user so it covers that user's credential files.
+ExecStart=/usr/local/bin/credsentinel scan --config /etc/credsentinel/config.json --with-honeytokens
+# Webhook auth token and the Canarytoken DNS host come from the environment,
+# never the config file.
+EnvironmentFile=-/etc/credsentinel/credsentinel.env
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=300
+
+# --- privilege reduction: a read-only audit, no new privileges ---
+NoNewPrivileges=true
+UMask=0077
+
+# --- filesystem: read-only everywhere; no writable carve-out needed for a scan ---
+ProtectSystem=strict
+# ProtectHome must stay read-only (not "true") — the scan MUST read the home dir
+# and the stealer-target credential files. tmpfs/true would hide them.
+ProtectHome=read-only
+# The honeytoken watch reads its manifest (default ~/.config/credsentinel/...).
+ReadOnlyPaths=/etc/credsentinel
+PrivateTmp=true
+
+# --- kernel / namespace hardening ---
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# AF_INET/AF_INET6 are required: the webhook POST and TruffleHog's live-credential
+# verification both make network calls.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot
+
+[Install]
+WantedBy=multi-user.target

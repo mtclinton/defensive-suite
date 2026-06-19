@@ -1,0 +1,17 @@
+[Unit]
+Description=Run bpfsentry live-vs-allowlist diff daily
+Documentation=https://github.com/mtclinton/defensive-suite
+
+[Timer]
+# Daily, early morning, with up to 30 min of jitter so a fleet does not stampede
+# the collector. Persistent=true runs a missed diff after the machine wakes.
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=30m
+Persistent=true
+# Also run shortly after boot — but note the boot allowlist is captured by
+# bpfsentry-baseline.service first; this diff then confirms nothing changed since.
+OnBootSec=15min
+Unit=bpfsentry-diff.service
+
+[Install]
+WantedBy=timers.target

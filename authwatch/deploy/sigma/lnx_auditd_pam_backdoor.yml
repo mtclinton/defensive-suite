@@ -1,0 +1,38 @@
+title: PAM Configuration Or Module Tampering
+id: 4e1c9f57-8a02-4d6b-bf3e-1a7c9d2b5e64
+status: experimental
+description: |
+  Detects modification of PAM configuration under /etc/pam.d/ or of a PAM shared
+  object under a *security/ directory — the on-disk footprint of a PAM backdoor
+  (Velvet Ant's backdoored pam_unix.so variants, the QLNX RAT's compiled PAM
+  modules). A PAM module written outside the package manager is the highest-
+  fidelity signal; authwatch's `pam` check flags those directly. Pairs with the
+  authwatch audit watch `authwatch_pam`.
+references:
+  - https://attack.mitre.org/techniques/T1556/003/
+  - https://github.com/mtclinton/defensive-suite/tree/main/authwatch
+author: defensive-suite/authwatch
+date: 2026-06-19
+tags:
+  - attack.persistence
+  - attack.credential_access
+  - attack.defense_evasion
+  - attack.t1556.003
+logsource:
+  product: linux
+  service: auditd
+detection:
+  pam_config:
+    type: 'PATH'
+    name|startswith: '/etc/pam.d/'
+  pam_module:
+    type: 'PATH'
+    name|contains: '/security/'
+    name|endswith: '.so'
+  audit_key:
+    key: 'authwatch_pam'
+  condition: pam_config or pam_module or audit_key
+falsepositives:
+  - Legitimate PAM package upgrades — correlate with the package manager
+    transaction log (dnf/rpm/apt history) before escalating.
+level: high

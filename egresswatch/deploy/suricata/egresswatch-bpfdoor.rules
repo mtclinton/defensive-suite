@@ -1,0 +1,53 @@
+# egresswatch — Suricata rules for the documented BPFDoor magic-packet markers.
+#
+# egresswatch SHIPS these rules; it does NOT install Suricata or load them. Feed
+# them to a Suricata sensor on a mirrored/tap interface (homelab gateway). See
+# deploy/README.md. SIDs use the local 1_000_0xx range — adjust to your scheme.
+#
+# Markers (from public BPFDoor/Symbiote analysis):
+#   1) The magic-packet activation frame carries a hardcoded TCP sequence number
+#      of 1234 (decimal) as its trigger constant. On the wire that 32-bit field
+#      is 00 00 04 D2 (1234 == 0x4D2). Suricata's `seq` keyword matches the field
+#      exactly, so it is used directly below (no fragile content match needed).
+#   2) The heartbeat/ack thread injects an ICMP echo with a technically invalid
+#      ICMP Code of 1 on an Echo Request (type 8, code must be 0) — a protocol
+#      anomaly that legitimate stacks never produce.
+#
+# These are detections of last resort: a kernel-resident implant can hide its
+# socket from the live host, but the bytes on the wire still pass the tap.
+
+# --- Marker 1: BPFDoor magic TCP sequence == 1234 ---
+# Match the raw 32-bit sequence field. seq is a Suricata keyword (exact match)
+# and matches the on-wire bytes 00 00 04 D2 for us; no content match is required.
+alert tcp any any -> any any ( \
+    msg:"EGRESSWATCH BPFDoor magic-packet TCP seq=1234 (activation trigger)"; \
+    flow:stateless; \
+    seq:1234; \
+    classtype:trojan-activity; \
+    reference:url,attack.mitre.org/techniques/T1205/002/; \
+    metadata:tool egresswatch, marker bpfdoor_magic_seq; \
+    sid:1000010; rev:1; \
+)
+
+# --- Marker 2: invalid ICMP Code 1 on an Echo Request (heartbeat anomaly) ---
+# itype 8 = Echo Request; a conformant stack always uses code 0. The BPFDoor
+# heartbeat thread injects code 1 — never legitimate.
+alert icmp any any -> any any ( \
+    msg:"EGRESSWATCH BPFDoor heartbeat — invalid ICMP Echo Request code 1"; \
+    itype:8; icode:1; \
+    classtype:trojan-activity; \
+    reference:url,attack.mitre.org/techniques/T1205/002/; \
+    metadata:tool egresswatch, marker bpfdoor_icmp_code1; \
+    sid:1000012; rev:1; \
+)
+
+# Echo Reply (type 0) with the same anomalous code 1, in case the implant tags
+# the reply direction instead of the request.
+alert icmp any any -> any any ( \
+    msg:"EGRESSWATCH BPFDoor heartbeat — invalid ICMP Echo Reply code 1"; \
+    itype:0; icode:1; \
+    classtype:trojan-activity; \
+    reference:url,attack.mitre.org/techniques/T1205/002/; \
+    metadata:tool egresswatch, marker bpfdoor_icmp_code1_reply; \
+    sid:1000013; rev:1; \
+)

@@ -1,0 +1,67 @@
+{
+  "_comment": "egresswatch expected-egress allowlist. A connection is flagged unless a rule matches: every populated field must match (empty field = any). cidr matches the remote IP; resolved_ips pins a hostname to known IPs (pre-resolve them out of band so the evaluator stays pure/offline). Tune to your workstation.",
+
+  "allow_loopback": true,
+  "allow_private": false,
+
+  "rules": [
+    {
+      "name": "tailscale-cgnat",
+      "comment": "Tailscale assigns 100.64.0.0/10 (CGNAT) to the tailnet.",
+      "cidr": "100.64.0.0/10"
+    },
+    {
+      "name": "tailscale-derp-and-coord",
+      "comment": "Tailscale control + DERP relays ride HTTPS; pin to your region's IPs if you want it tighter.",
+      "proto": "tcp",
+      "ports": [443]
+    },
+    {
+      "name": "debian-security-mirror",
+      "host": "security.debian.org",
+      "resolved_ips": ["151.101.0.204", "151.101.66.204"],
+      "proto": "tcp",
+      "ports": [80, 443]
+    },
+    {
+      "name": "deb-mirror",
+      "host": "deb.debian.org",
+      "resolved_ips": ["151.101.0.204"],
+      "proto": "tcp",
+      "ports": [80, 443]
+    },
+    {
+      "name": "arch-mirror",
+      "host": "mirror.example.org",
+      "resolved_ips": ["203.0.113.10"],
+      "proto": "tcp",
+      "ports": [443]
+    },
+    {
+      "name": "github",
+      "host": "github.com",
+      "resolved_ips": ["140.82.112.3", "140.82.112.4"],
+      "proto": "tcp",
+      "ports": [22, 443]
+    },
+    {
+      "name": "dns-doh",
+      "comment": "DNS-over-HTTPS to a pinned resolver.",
+      "cidr": "1.1.1.1/32",
+      "proto": "tcp",
+      "ports": [443]
+    },
+    {
+      "name": "dns-udp",
+      "comment": "Plain DNS to the local/pinned resolver.",
+      "cidr": "1.1.1.1/32",
+      "proto": "udp",
+      "ports": [53]
+    },
+    {
+      "name": "ntp",
+      "proto": "udp",
+      "ports": [123]
+    }
+  ]
+}

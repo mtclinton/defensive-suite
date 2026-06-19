@@ -1,0 +1,49 @@
+[Unit]
+Description=posturescan — kernel & container hardening posture scan
+Documentation=https://github.com/mtclinton/defensive-suite
+
+[Service]
+Type=oneshot
+# posturescan only READS the system: /proc/sys, /sys/kernel/security/lockdown,
+# systemd unit files, container specs, and (optionally) shells out to
+# lynis/oscap/systemd-analyze. It writes nothing to /etc and never applies
+# remediation. It is hardened to a near read-only audit.
+ExecStart=/usr/local/bin/posturescan scan --config /etc/posturescan/config.json --wrap-tools
+# The webhook auth token comes from the environment, never the config file.
+EnvironmentFile=-/etc/posturescan/posturescan.env
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=180
+
+# --- privilege reduction ---
+NoNewPrivileges=true
+# CAP_DAC_READ_SEARCH lets it read root-owned container specs / unit files; the
+# sysctl/lockdown reads are world-readable. No write capability is granted.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+UMask=0077
+
+# --- filesystem: read-only audit, no writable carve-out needed ---
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+# --- kernel / namespace hardening ---
+# NOTE: ProtectKernelTunables would hide /proc/sys from the very check that reads
+# it, so it is intentionally LEFT OFF. The service only reads those tunables.
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot
+
+[Install]
+WantedBy=multi-user.target

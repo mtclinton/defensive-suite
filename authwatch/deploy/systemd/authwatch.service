@@ -1,0 +1,58 @@
+[Unit]
+Description=authwatch — Linux trust-path integrity check (PAM/OpenSSH/ld.so.preload)
+Documentation=https://github.com/mtclinton/defensive-suite
+# Run after auditd so `authwatch check` can read the loaded ruleset.
+After=auditd.service
+
+[Service]
+Type=oneshot
+# authwatch reads /root/.ssh, PAM modules, shadow-adjacent config and runs
+# rpm -V / dpkg -V, so it needs broad read access. It is hardened to a near
+# read-only audit: CAP_DAC_READ_SEARCH to read any file, CAP_AUDIT_READ so
+# `auditctl -l` can read the loaded ruleset, and a narrow writable carve-out for
+# rpm's database working files. It otherwise writes nothing to disk.
+ExecStart=/usr/local/bin/authwatch check --config /etc/authwatch/config.json --aide
+# The webhook auth token comes from the environment, never the config file.
+EnvironmentFile=-/etc/authwatch/authwatch.env
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=120
+
+# --- privilege reduction ---
+NoNewPrivileges=true
+# CAP_AUDIT_READ lets `auditctl -l` read the kernel ruleset (the auditd check);
+# CAP_DAC_READ_SEARCH bypasses DAC to read /root/.ssh, PAM modules, etc.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_AUDIT_READ
+AmbientCapabilities=CAP_DAC_READ_SEARCH CAP_AUDIT_READ
+UMask=0077
+
+# --- filesystem: read-only audit, with a narrow writable area for rpm's db ---
+ProtectSystem=strict
+ProtectHome=read-only
+# rpm/sqlite (RHEL 9+/Fedora) opens -wal/-shm sidecars in the rpmdb dir even for
+# a read-only verify; without this carve-out `rpm -Vf` fails under ProtectSystem=strict.
+ReadWritePaths=/var/lib/rpm /var/tmp
+# NOTE: PrivateTmp is intentionally OFF — the QLNX fake-X11-lockfile check must
+# see the real /tmp/.X*-lock files.
+PrivateTmp=false
+
+# --- kernel / namespace hardening ---
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# AF_NETLINK is required by `auditctl -l` (NETLINK_AUDIT) for the audit check.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot
+
+[Install]
+WantedBy=multi-user.target

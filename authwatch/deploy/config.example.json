@@ -1,0 +1,25 @@
+{
+  "webhook_url": "https://collector.example.internal/ingest/authwatch",
+  "baseline_path": "/mnt/trust-anchor/authwatch-baseline.json",
+  "allowlist_path": "/etc/authwatch/authorized_keys.allow",
+  "aide_config": "/etc/authwatch/authwatch.aide.conf",
+
+  "security_dirs": [
+    "/lib64/security",
+    "/usr/lib64/security",
+    "/usr/lib/x86_64-linux-gnu/security"
+  ],
+  "auth_binaries": [
+    "/usr/sbin/sshd",
+    "/usr/bin/ssh",
+    "/usr/bin/sudo",
+    "/usr/bin/su",
+    "/lib64/libc.so.6"
+  ],
+  "ssh_key_globs": [
+    "/root/.ssh/authorized_keys",
+    "/home/*/.ssh/authorized_keys"
+  ],
+  "xlock_glob": "/tmp/.X*-lock",
+  "xserver_uids": [0]
+}

@@ -1,0 +1,39 @@
+title: eBPF Program Load From Unexpected Process
+id: 7f3a1c92-6d4e-4b8a-9e21-3c5f0a7b1d62
+status: experimental
+description: |
+  Detects use of the bpf() syscall (program load / attach) on a host where eBPF
+  loads should be rare and attributable. An eBPF rootkit (IronWorm, LinkPro,
+  BPFDoor lineage, the QLNX RAT's kernel component) must call bpf(BPF_PROG_LOAD)
+  to install itself before it can hook sys_bpf and hide; this rule catches that
+  moment. Correlate the loading process against the legitimate-loader allowlist
+  (the same set bpfsentry's Tetragon policy and `allowed_loaders` config use)
+  before escalating. Pairs with the auditd key bpf_activity.
+references:
+  - https://attack.mitre.org/techniques/T1014/
+  - https://attack.mitre.org/techniques/T1562/001/
+  - https://github.com/mtclinton/defensive-suite/tree/main/bpfsentry
+author: defensive-suite/bpfsentry
+date: 2026-06-19
+tags:
+  - attack.defense_evasion
+  - attack.persistence
+  - attack.t1014
+  - attack.t1562.001
+logsource:
+  product: linux
+  service: auditd
+detection:
+  bpf_syscall:
+    type: 'SYSCALL'
+    syscall: 'bpf'
+  audit_key:
+    key: 'bpf_activity'
+  bpffs_pin:
+    key: 'bpf_pin'
+  condition: bpf_syscall or audit_key or bpffs_pin
+falsepositives:
+  - Legitimate eBPF agents (Cilium, Tetragon, an eBPF EDR, bpftrace) on hosts
+    that run them — allowlist the loader's executable/PID and alert only on the
+    complement.
+level: high

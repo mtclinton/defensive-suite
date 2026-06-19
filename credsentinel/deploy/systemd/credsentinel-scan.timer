@@ -1,0 +1,18 @@
+[Unit]
+Description=Run credsentinel secret-exposure scan + honeytoken watch periodically
+Documentation=https://github.com/mtclinton/defensive-suite
+
+[Timer]
+# Several times a day, with jitter so a fleet does not stampede the collector and
+# so a honeytoken trip is caught within hours, not at the next nightly run.
+# Persistent=true runs a missed check after the machine wakes.
+OnCalendar=*-*-* 02,08,14,20:00:00
+RandomizedDelaySec=20m
+Persistent=true
+# Also run shortly after boot — a stealer that ran at install time may already
+# have read a decoy before the first scheduled scan.
+OnBootSec=5min
+Unit=credsentinel-scan.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,37 @@
+# bpfsentry — Tracee policy: surface eBPF-malware behaviour and the events that
+# accompany an eBPF rootkit installing itself.
+#
+# Layer 2 of the design (load-time alerting), Tracee variant. Tracee's
+# bpf_attach event surfaces eBPF malware (e.g. Pamspy attaching to PAM);
+# the security_bpf_prog_load event covers the program-load path; anti_debugging /
+# hidden_kernel_module and the LdPreload signature round out the kernel-implant
+# and persistence picture.
+#
+# SHIPPED, NOT LOADED. Loading a Tracee policy changes what Tracee instruments.
+# Apply it yourself after review:
+#   tracee --policy bpfsentry-tracee-policy.yaml
+# or (k8s) kubectl apply -f bpfsentry-tracee-policy.yaml
+apiVersion: tracee.aquasec.com/v1beta1
+kind: Policy
+metadata:
+  name: bpfsentry-ebpf-rootkit
+  annotations:
+    description: >-
+      Detect eBPF-rootkit installation and behaviour: program loads, attach
+      events, hidden kernel modules, and ld.so.preload persistence.
+spec:
+  scope:
+    - global
+  rules:
+    # The moment a BPF program is loaded — pair with the Tetragon policy and with
+    # bpfsentry's early-boot allowlist diff.
+    - event: security_bpf_prog
+    # eBPF malware attaching to a hook (Tracee's high-signal eBPF-malware event).
+    - event: bpf_attach
+    # The raw syscall, for correlation / hunting.
+    - event: bpf
+    # Kernel-implant tells.
+    - event: hidden_kernel_module
+    - event: hooked_syscall
+    # Persistence that often ships alongside an eBPF rootkit (QLNX, BPFDoor lineage).
+    - event: ld_preload

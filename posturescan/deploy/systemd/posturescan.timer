@@ -1,0 +1,17 @@
+[Unit]
+Description=Run posturescan hardening posture scan daily
+Documentation=https://github.com/mtclinton/defensive-suite
+
+[Timer]
+# Daily, early morning, with up to 30 min of jitter so a fleet does not stampede
+# the collector. Persistent=true runs a missed scan after the machine wakes.
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=30m
+Persistent=true
+# Also run shortly after boot — kernel sysctls/lockdown are set at boot, so a
+# post-boot scan catches a host that came up unhardened.
+OnBootSec=15min
+Unit=posturescan.service
+
+[Install]
+WantedBy=timers.target

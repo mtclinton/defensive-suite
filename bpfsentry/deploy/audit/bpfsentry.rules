@@ -1,0 +1,22 @@
+## bpfsentry — auditd rules for the bpf() syscall.
+##
+## bpfsentry SHIPS these rules but never loads them into the kernel. Install them
+## yourself after review (see deploy/README.md). On a workstation that should NOT
+## be running eBPF at all, every bpf() call is worth recording; on a host that
+## does run Cilium/Tetragon, correlate the key against the legitimate-loader PIDs
+## (the same allowlist the Tetragon policy uses) before escalating.
+##
+## Layer 2 (load-time visibility), auditd variant. This is the cheapest tripwire:
+## it needs no eBPF of its own and so cannot be hidden by a sys_bpf hook the way an
+## on-box eBPF EDR can.
+
+## --- the bpf() syscall on both ABIs ---
+-a always,exit -F arch=b64 -S bpf -k bpf_activity
+-a always,exit -F arch=b32 -S bpf -k bpf_activity
+
+## --- bpffs pin directory: a program pinned here persists across the loader exiting ---
+-w /sys/fs/bpf -p wa -k bpf_pin
+
+## --- bpftool itself (legit enumeration vs. an attacker probing the BPF subsystem) ---
+-w /usr/sbin/bpftool -p x -k bpf_tool
+-w /usr/bin/bpftool -p x -k bpf_tool
