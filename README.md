@@ -34,7 +34,9 @@ findings (which never leave your network). No build step.
 | `bpfsentry` | **Flagship.** Offline eBPF-program enumerator + out-of-band memory forensics | Go (cilium/ebpf) + Python (Volatility 3) |
 
 Each tool directory is self-contained and carries its own `DESIGN.md`. The full
-threat-to-defense mapping lives in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+threat-to-defense mapping lives in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md); the
+design/decision doc for evolving the suite into endpoint protection (EPP/EDR) is in
+[`docs/ENDPOINT_PROTECTION.md`](docs/ENDPOINT_PROTECTION.md).
 
 ## Build order
 
