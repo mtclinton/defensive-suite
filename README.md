@@ -8,13 +8,19 @@ and then hides kernel-resident via an eBPF rootkit.
 Six composable tools, mostly Go with eBPF where it earns its place, plus a Python
 forensics path for the one problem that can't be solved from the live kernel.
 
-## Dashboard
+## Collector & dashboard
 
-A static, dependency-free collector dashboard lives in [`dashboard/`](dashboard/) and is
-published via GitHub Pages: **<https://mtclinton.github.io/defensive-suite/dashboard/>**.
-It renders the `Report`/`Finding` JSON every tool emits (`<tool> check --format json`) —
-findings filterable by tool / severity / ATT&CK technique, the threat-model → defense map,
-and per-tool posture. Drop in real output to render live; no build step.
+The [`collector/`](collector/) service is the aggregation keystone: every tool POSTs its
+`Report` JSON to one bearer-authed `/ingest` endpoint, and it serves the dashboard with
+live, local data — the "one local collector" the architecture is built around. A single
+static Go binary; bind it to a private/Tailscale interface.
+
+A static, dependency-free build of that same dashboard lives in [`dashboard/`](dashboard/)
+and is published via GitHub Pages:
+**<https://mtclinton.github.io/defensive-suite/dashboard/>** — findings filterable by
+tool / severity / ATT&CK technique, the threat-model → defense map, and per-tool posture.
+The public page shows **sample** data; served by the collector it shows your **real**
+findings (which never leave your network). No build step.
 
 ## The tools
 

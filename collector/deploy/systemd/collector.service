@@ -1,0 +1,51 @@
+[Unit]
+Description=defensive-suite collector — aggregates tool findings and serves the dashboard
+Documentation=https://github.com/mtclinton/defensive-suite
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The ingest bearer token (COLLECTOR_TOKEN=...). Keep this file 0600; the token
+# is never passed on the command line (it would be visible in the process table).
+EnvironmentFile=/etc/collector/collector.env
+# Bind loopback by default. To accept reports from other hosts, change --addr to
+# a PRIVATE interface (e.g. the machine's Tailscale IP) — never 0.0.0.0 on an
+# untrusted network.
+ExecStart=/usr/local/bin/collector --addr 127.0.0.1:8787 --data %S/collector
+Restart=on-failure
+RestartSec=3
+Nice=5
+
+# --- run as a transient unprivileged user with its own state dir (/var/lib/collector) ---
+DynamicUser=true
+StateDirectory=collector
+
+# --- hardening ---
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap
+MemoryMax=256M
+TasksMax=64
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
