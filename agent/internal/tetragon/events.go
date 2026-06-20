@@ -34,6 +34,7 @@ type kprobeArg struct {
 	FileArg   *pathArg `json:"file_arg"`
 	PathArg   *pathArg `json:"path_arg"`
 	StringArg *string  `json:"string_arg"`
+	IntArg    *int64   `json:"int_arg"`
 }
 
 type kprobeEvent struct {
@@ -54,7 +55,9 @@ type rawEvent struct {
 }
 
 // Event is the normalized form. Paths holds any file paths referenced by a
-// kprobe's arguments.
+// kprobe's arguments; Ints holds any integer arguments in their original order
+// (e.g. the LSM mask for security_file_permission, where bit MAY_WRITE=2
+// distinguishes a write from a read/exec).
 type Event struct {
 	Kind     string // "exec", "exit", "kprobe"
 	Binary   string
@@ -68,9 +71,18 @@ type Event struct {
 	Policy   string
 	Action   string
 	Paths    []string
+	Ints     []int64
 	Node     string
 	Time     string
 }
+
+// HasMask reports whether the event carries an integer mask argument (e.g. the
+// security_file_permission LSM access mask). ParseLine records int args in Ints.
+func (e Event) HasMask() bool { return len(e.Ints) > 0 }
+
+// MayWrite reports whether the event's first integer mask argument has the
+// MAY_WRITE bit (2) set. Only meaningful when HasMask is true.
+func (e Event) MayWrite() bool { return len(e.Ints) > 0 && e.Ints[0]&0x2 != 0 }
 
 // ParseLine parses one JSON event line. ok is false for blank/malformed/unknown.
 func ParseLine(line string) (Event, bool) {
@@ -108,6 +120,8 @@ func normalize(r rawEvent) (Event, bool) {
 				e.Paths = append(e.Paths, a.PathArg.Path)
 			case a.StringArg != nil && strings.HasPrefix(*a.StringArg, "/"):
 				e.Paths = append(e.Paths, *a.StringArg)
+			case a.IntArg != nil:
+				e.Ints = append(e.Ints, *a.IntArg)
 			}
 		}
 	default:
@@ -116,16 +130,67 @@ func normalize(r rawEvent) (Event, bool) {
 	return e, true
 }
 
+// maxLineBytes caps a single event line. A line longer than this (e.g. an
+// attacker-influenced huge argv) is SKIPPED, not fatal: parsing continues with
+// the next line. bufio.Scanner instead returns ErrTooLong and STOPS, which would
+// silently drop every subsequent event — exactly what an attacker wants.
+const maxLineBytes = 8 * 1024 * 1024
+
 // ParseStream yields normalized events from a reader of JSON lines, skipping
-// anything malformed. It tolerates long lines.
+// anything malformed. An over-long line (> maxLineBytes) is dropped and parsing
+// CONTINUES with the following lines, so one oversized event cannot suppress
+// detection of everything after it. Memory stays bounded: lines are read through
+// a fixed-size buffer in chunks, never materialized whole when over-long.
 func ParseStream(r io.Reader) []Event {
 	var out []Event
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		if e, ok := ParseLine(sc.Text()); ok {
-			out = append(out, e)
+	br := bufio.NewReaderSize(r, 64*1024)
+	for {
+		line, err := readLineBounded(br)
+		if line != "" {
+			if e, ok := ParseLine(line); ok {
+				out = append(out, e)
+			}
+		}
+		if err != nil {
+			return out // io.EOF or a read error: stop.
 		}
 	}
-	return out
+}
+
+// readLineBounded reads one '\n'-terminated line, capped at maxLineBytes, using
+// ReadSlice so the reader's fixed internal buffer bounds memory. If the line
+// exceeds the cap, its bytes are drained up to (and including) the next newline
+// and "" is returned, so the caller skips it and proceeds. err is non-nil only
+// on EOF or a genuine read error.
+func readLineBounded(br *bufio.Reader) (string, error) {
+	var sb strings.Builder
+	overLong := false
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if !overLong {
+			if sb.Len()+len(chunk) > maxLineBytes {
+				overLong = true
+				sb.Reset() // release what we held; stop accumulating this line
+			} else {
+				sb.Write(chunk)
+			}
+		}
+		switch err {
+		case nil:
+			// chunk ended in '\n': a complete line.
+			if overLong {
+				return "", nil // skipped: tell the caller to move on
+			}
+			return strings.TrimRight(sb.String(), "\n"), nil
+		case bufio.ErrBufferFull:
+			// Partial line filling the buffer with no newline yet: keep draining.
+			continue
+		default:
+			// EOF or a read error: return whatever we have (unless over-long).
+			if overLong {
+				return "", err
+			}
+			return strings.TrimRight(sb.String(), "\n"), err
+		}
+	}
 }

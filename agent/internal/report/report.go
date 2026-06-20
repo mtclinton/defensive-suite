@@ -96,6 +96,11 @@ type Report struct {
 	Distro   string    `json:"distro,omitempty"`
 	Findings []Finding `json:"findings"`
 	Summary  Summary   `json:"summary"`
+	// Append marks an event-stream delta: the collector accumulates these
+	// findings onto the prior set for this (tool, host) rather than replacing it.
+	// agentd's `run` mode sets this so deltas trimmed from its small in-memory
+	// buffer are not lost; scan mode (a full posture) leaves it false.
+	Append bool `json:"append,omitempty"`
 }
 
 // Summary is a roll-up of the findings, used for journald/webhook and exit code.

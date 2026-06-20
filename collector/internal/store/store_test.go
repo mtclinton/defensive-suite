@@ -95,3 +95,52 @@ func TestSummaryCleanWhenNoMediumPlus(t *testing.T) {
 		t.Errorf("low/info only should be clean: %+v", sum)
 	}
 }
+
+// Two Append reports for the same (tool, host) must ACCUMULATE, not replace —
+// otherwise agentd's event-stream deltas trimmed from its small buffer are lost.
+func TestAppendReportsAccumulate(t *testing.T) {
+	s, _ := New(t.TempDir(), 0, 0)
+	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Minute)
+	s.AddReport(Report{Tool: "agent", Host: "h", Time: t1, Received: t1, Append: true,
+		Findings: []Finding{{Severity: "critical", Title: "first"}}})
+	s.AddReport(Report{Tool: "agent", Host: "h", Time: t2, Received: t2, Append: true,
+		Findings: []Finding{{Severity: "high", Title: "second"}}})
+	f := s.LatestFindings(Filter{})
+	if len(f) != 2 {
+		t.Fatalf("append reports should accumulate to 2 findings, got %d: %+v", len(f), f)
+	}
+	titles := map[string]bool{f[0].Title: true, f[1].Title: true}
+	if !titles["first"] || !titles["second"] {
+		t.Errorf("both append deltas should survive: %+v", f)
+	}
+	if sum := s.Summary(); sum.Findings != 2 {
+		t.Errorf("summary should reflect accumulated findings: %+v", sum)
+	}
+}
+
+// A non-append (full posture) report REPLACES the prior posture, including any
+// earlier accumulation; later appends accumulate onto the new baseline.
+func TestNonAppendReplacesThenAppendsAccumulate(t *testing.T) {
+	s, _ := New(t.TempDir(), 0, 0)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// Accumulate two append deltas.
+	s.AddReport(Report{Tool: "agent", Host: "h", Time: base, Received: base, Append: true,
+		Findings: []Finding{{Severity: "high", Title: "delta1"}}})
+	s.AddReport(Report{Tool: "agent", Host: "h", Time: base.Add(time.Minute), Received: base.Add(time.Minute), Append: true,
+		Findings: []Finding{{Severity: "high", Title: "delta2"}}})
+	// A full report replaces them.
+	s.AddReport(Report{Tool: "agent", Host: "h", Time: base.Add(2 * time.Minute), Received: base.Add(2 * time.Minute),
+		Findings: []Finding{{Severity: "critical", Title: "full"}}})
+	f := s.LatestFindings(Filter{})
+	if len(f) != 1 || f[0].Title != "full" {
+		t.Fatalf("full report should replace accumulation, got %+v", f)
+	}
+	// A later append accumulates onto the replaced baseline.
+	s.AddReport(Report{Tool: "agent", Host: "h", Time: base.Add(3 * time.Minute), Received: base.Add(3 * time.Minute), Append: true,
+		Findings: []Finding{{Severity: "low", Title: "delta3"}}})
+	f = s.LatestFindings(Filter{})
+	if len(f) != 2 {
+		t.Fatalf("append after full should accumulate onto baseline, got %d: %+v", len(f), f)
+	}
+}

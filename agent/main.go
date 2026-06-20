@@ -128,8 +128,23 @@ func cmdRun(args []string) int {
 
 	buf := pipeline.NewBuffer(cfg.BufferMax)
 	client := &http.Client{Timeout: 15 * time.Second}
+	// run mode emits an event STREAM: each flush posts only the findings drained
+	// since the last flush, as an Append delta. The collector accumulates these,
+	// so deltas the bounded buffer would later trim are not lost. If the cap was
+	// hit within a window, some findings were trimmed before this flush — warn
+	// (loudly, not silently) so the operator can raise AGENT buffer/flush rate.
 	flush := func() {
-		rep := report.New("agent", cfg.Host, "", time.Now(), buf.Snapshot())
+		if dropped := buf.Dropped(); dropped > 0 {
+			fmt.Fprintf(os.Stderr,
+				"<%d>agent[buffer] WARNING: dropped %d findings this window (buffer cap %d hit); raise BufferMax or flush more often\n",
+				4, dropped, cfg.BufferMax)
+		}
+		pending := buf.Drain()
+		if len(pending) == 0 {
+			return
+		}
+		rep := report.New("agent", cfg.Host, "", time.Now(), pending)
+		rep.Append = true
 		_ = report.EmitJournal(os.Stderr, rep)
 		if cfg.CollectorURL != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

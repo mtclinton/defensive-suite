@@ -25,11 +25,22 @@ spec:
       # no selectors/actions → every load is reported (agentd allowlists loaders).
 
     # Writes to trust-path files (ld.so.preload / PAM / authorized_keys / sshd_config).
+    #
+    # security_file_permission(file, mask) fires on read+write+exec. We declare
+    # arg index 1 (the access mask) and AND a Mask selector value "2" (MAY_WRITE)
+    # with the path match, so Tetragon emits ONLY writes — sshd reading
+    # sshd_config, an authorized_keys read on login, and PAM reading a module no
+    # longer surface as events. (agentd also mask-gates defensively.)
+    #
+    # Per-user SSH keys are caught with a Postfix on "/.ssh/authorized_keys"
+    # (and "authorized_keys2") so /home/<user> keys are surfaced, not only /root.
     - call: "security_file_permission"
       syscall: false
       args:
         - index: 0
           type: "file"
+        - index: 1
+          type: "int"
       selectors:
         - matchArgs:
             - index: 0
@@ -42,4 +53,19 @@ spec:
                 - "/lib64/security/"
                 - "/usr/lib64/security/"
                 - "/etc/ssh/sshd_config"
+            - index: 1
+              operator: "Mask"
+              values:
+                - "2" # MAY_WRITE — drop read/exec accesses
+          # no matchActions → OBSERVE only.
+        - matchArgs:
+            - index: 0
+              operator: "Postfix"
+              values:
+                - "/.ssh/authorized_keys"
+                - "/.ssh/authorized_keys2"
+            - index: 1
+              operator: "Mask"
+              values:
+                - "2" # MAY_WRITE
           # no matchActions → OBSERVE only.

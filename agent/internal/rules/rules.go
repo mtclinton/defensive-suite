@@ -69,7 +69,7 @@ func kprobeRules(e tetragon.Event, cfg Config) []report.Finding {
 		})
 	}
 
-	if contains(cfg.WriteFuncs, e.Function) {
+	if contains(cfg.WriteFuncs, e.Function) && writeIntent(e) {
 		for _, p := range e.Paths {
 			if match, ok := sensitiveMatch(p, cfg.SensitivePaths); ok {
 				out = append(out, report.Finding{
@@ -82,6 +82,20 @@ func kprobeRules(e tetragon.Event, cfg Config) []report.Finding {
 		}
 	}
 	return out
+}
+
+// writeIntent gates a trust-path "write" finding on actual write intent.
+// security_file_permission's LSM hook fires on read+write+exec, carrying an
+// access mask (arg index 1: MAY_READ=4 / MAY_WRITE=2 / MAY_EXEC=1). When a mask
+// is present we only flag when MAY_WRITE is set — otherwise sshd reading
+// sshd_config, an authorized_keys read on login, or PAM reading a module become
+// Critical false positives. A hook that carries no mask (a genuinely write-only
+// path like security_path_truncate) flags as before.
+func writeIntent(e tetragon.Event) bool {
+	if e.HasMask() {
+		return e.MayWrite()
+	}
+	return true
 }
 
 func execDetail(e tetragon.Event) string {
@@ -110,17 +124,28 @@ func allowlisted(binary string, allow []string) bool {
 	return false
 }
 
-// sensitiveMatch reports whether path hits a sensitive entry: an exact file, or
-// a directory entry ending in "/". It returns the matched entry for technique
-// attribution.
+// sensitiveMatch reports whether path hits a sensitive entry. Three entry forms:
+//   - ending in "/"        → directory prefix (e.g. "/etc/pam.d/")
+//   - beginning with "*"   → suffix match (e.g. "*/.ssh/authorized_keys" covers
+//     every user's key file, including /root and /home/<user>)
+//   - otherwise            → exact file path
+//
+// It returns the matched entry for technique attribution.
 func sensitiveMatch(path string, sensitive []string) (string, bool) {
 	for _, s := range sensitive {
-		if strings.HasSuffix(s, "/") {
+		switch {
+		case strings.HasSuffix(s, "/"):
 			if strings.HasPrefix(path, s) {
 				return s, true
 			}
-		} else if path == s {
-			return s, true
+		case strings.HasPrefix(s, "*"):
+			if strings.HasSuffix(path, s[1:]) {
+				return s, true
+			}
+		default:
+			if path == s {
+				return s, true
+			}
 		}
 	}
 	return "", false
@@ -132,7 +157,7 @@ func techniqueFor(sensitive string) string {
 		return "T1574.006"
 	case strings.Contains(sensitive, "pam.d") || strings.Contains(sensitive, "security/"):
 		return "T1556.003"
-	case strings.Contains(sensitive, "authorized_keys"):
+	case strings.Contains(sensitive, "authorized_keys") || strings.Contains(sensitive, ".ssh/"):
 		return "T1098.004"
 	default:
 		return "T1565.001"

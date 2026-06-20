@@ -37,6 +37,11 @@ type Report struct {
 	Findings []Finding       `json:"findings"`
 	Summary  json.RawMessage `json:"summary,omitempty"`
 	Received time.Time       `json:"received"`
+	// Append marks an event-stream delta (e.g. agentd's `run` mode): instead of
+	// replacing the prior posture for this (tool, host), the store accumulates
+	// these findings onto a bounded rolling slice so deltas trimmed from the
+	// agent's small buffer are retained here.
+	Append bool `json:"append,omitempty"`
 }
 
 var sevRank = map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -139,18 +144,65 @@ type Filter struct {
 	Host     string
 }
 
-// latest returns the most recent report per (tool, host).
-func (s *Store) latest() []Report {
-	byKey := map[string]Report{}
-	for _, r := range s.reports {
+// appendCap bounds the per-(tool, host) accumulated append-stream findings so a
+// long-running event stream cannot grow the store without limit; the oldest
+// findings are dropped once the cap is reached.
+const appendCap = 2000
+
+// posture is the current-posture report for one (tool, host) key after the
+// accumulation pass: either the latest non-append report, or the rolling
+// accumulation of append (event-stream delta) reports.
+type posture struct {
+	Tool     string
+	Host     string
+	Time     time.Time
+	Findings []Finding
+}
+
+// current resolves the current posture per (tool, host). For keys whose stream
+// is append-mode (event deltas), it accumulates findings across all append
+// reports into a bounded rolling slice. For normal keys it keeps the latest
+// single report. If a key has both, the newest report wins per its kind: a
+// later non-append (full) report replaces the accumulation; later append
+// reports add to it.
+func (s *Store) current() []posture {
+	// Process reports in time order so accumulation and "latest wins" are stable.
+	ordered := append([]Report(nil), s.reports...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return reportTime(ordered[i]).Before(reportTime(ordered[j]))
+	})
+	type acc struct {
+		tool, host string
+		time       time.Time
+		findings   []Finding
+	}
+	byKey := map[string]*acc{}
+	for _, r := range ordered {
 		k := r.Tool + "\x00" + r.Host
-		if cur, ok := byKey[k]; !ok || reportTime(r).After(reportTime(cur)) {
-			byKey[k] = r
+		a := byKey[k]
+		if a == nil {
+			a = &acc{tool: r.Tool, host: r.Host}
+			byKey[k] = a
+		}
+		rt := reportTime(r)
+		if r.Append {
+			// Event-stream delta: accumulate onto the current posture, bounded by
+			// appendCap (oldest dropped) so a long stream cannot grow without limit.
+			a.findings = append(a.findings, r.Findings...)
+			if len(a.findings) > appendCap {
+				a.findings = append([]Finding(nil), a.findings[len(a.findings)-appendCap:]...)
+			}
+		} else {
+			// A full posture report replaces whatever came before.
+			a.findings = append([]Finding(nil), r.Findings...)
+		}
+		if rt.After(a.time) {
+			a.time = rt
 		}
 	}
-	out := make([]Report, 0, len(byKey))
-	for _, r := range byKey {
-		out = append(out, r)
+	out := make([]posture, 0, len(byKey))
+	for _, a := range byKey {
+		out = append(out, posture{Tool: a.tool, Host: a.host, Time: a.time, Findings: a.findings})
 	}
 	return out
 }
@@ -161,7 +213,7 @@ func (s *Store) LatestFindings(f Filter) []Finding {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var out []Finding
-	for _, r := range s.latest() {
+	for _, r := range s.current() {
 		if f.Tool != "" && r.Tool != f.Tool {
 			continue
 		}
@@ -236,9 +288,9 @@ func (s *Store) Summary() Summary {
 	hosts := map[string]bool{}
 	worst := 5
 	var updated time.Time
-	for _, r := range s.latest() {
-		if reportTime(r).After(updated) {
-			updated = reportTime(r)
+	for _, r := range s.current() {
+		if r.Time.After(updated) {
+			updated = r.Time
 		}
 		if r.Host != "" {
 			hosts[r.Host] = true

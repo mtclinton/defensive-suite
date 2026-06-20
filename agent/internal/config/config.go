@@ -46,21 +46,29 @@ func Defaults() Config {
 		TetragonLog:   "/var/log/tetragon/tetragon.log",
 		Host:          host,
 		FlushInterval: 10 * time.Second,
-		BufferMax:     1000,
+		BufferMax:     5000,
 		StagingDirs:   []string{"/tmp/", "/dev/shm/", "/var/tmp/"},
 		SensitivePaths: []string{
 			"/etc/ld.so.preload",
 			"/etc/pam.d/",
-			"/root/.ssh/authorized_keys",
+			// Suffix entries (leading "*") catch every user's SSH key files,
+			// including /root and /home/<user>, not just the exact /root path.
+			"*/.ssh/authorized_keys",
+			"*/.ssh/authorized_keys2",
 			"/lib/security/", "/lib64/security/",
 			"/usr/lib64/security/", "/usr/lib/x86_64-linux-gnu/security/",
 			"/etc/ssh/sshd_config",
 		},
 		BPFLoaderAllowlist: []string{},
 		BPFLoadFuncs:       []string{"security_bpf_prog_load", "bpf_check", "__sys_bpf"},
+		// Genuinely write-path hooks only. security_file_permission fires on
+		// read+write+exec, so it is mask-gated in the rule (MAY_WRITE=2); the
+		// other two are inherently write/attribute-change paths. fd_install /
+		// security_mmap_file (open/mmap of a file for read) were dropped — they
+		// turned every read of a trust-path file into a Critical false positive.
 		WriteFuncs: []string{
-			"security_file_permission", "security_inode_setattr",
-			"security_path_truncate", "fd_install", "security_mmap_file",
+			"security_file_permission", "security_path_truncate",
+			"security_inode_setattr",
 		},
 	}
 }
