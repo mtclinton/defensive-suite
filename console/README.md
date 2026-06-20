@@ -5,6 +5,31 @@ A native desktop console for the [defensive-suite](../README.md), built with
 adds a **system-tray** icon and **native notifications**, and shows your *live*
 collector data — at ~3 MB and a fraction of Electron's memory/attack surface.
 
+## Desktop behavior
+
+The console is an **always-on watcher**:
+
+- **Single-instance** — launching it again just **focuses the running window**
+  (shows + unminimizes + focuses) instead of opening a second copy.
+- **Window-state** — it **remembers its size and position** across restarts.
+- **Autostart / launch-to-tray** — it starts at login. On **first run** autostart
+  is enabled by default (so it's always-on out of the box); after that your choice
+  is respected — toggle it any time via the tray's checkable **"Start on login"**
+  item (Show console / Start on login / Quit). When launched at login it starts
+  **hidden in the tray** (via a `--hidden` flag); a manual launch opens the window
+  normally. Use the tray **"Show console"** to bring it forward.
+- **Notifications are per-finding** — instead of a coarse "posture changed" toast,
+  the background poller (every 15 s) fires a **specific, deduped** notification for
+  each new **correlated** (`⛓ Correlated threat`) or **critical** (`Critical
+  finding`) finding from the collector's `/api/findings`, with the finding title
+  plus the most useful locator (the `dst=…` from `related[]`, else the path).
+  Findings present at launch are **baselined silently** (no flood on startup),
+  each notifies **at most once**, and a burst of >5 new findings collapses into a
+  single summary toast. The current posture is shown in the **tray tooltip**
+  (e.g. `defensive-suite — 2 critical` / `defensive-suite — clean`), updated each
+  poll. (Desktop notifications have no reliable cross-platform click handler, so
+  the tray "Show console" item is the guaranteed way back into the window.)
+
 **M3 adds a manual-response panel** (kill / isolate / quarantine / revoke-key /
 block-hash). By design the GUI *requests* actions — the `respond` Rust command
 holds the response token and POSTs to the collector's audited `/api/respond`,
@@ -17,11 +42,11 @@ audits, and stays **dry-run unless explicitly enabled** (see
 ```
 console/
 └── src-tauri/
-    ├── Cargo.toml        # tauri v2 + notification plugin + ureq (collector poll/respond)
+    ├── Cargo.toml        # tauri v2 + notification/updater/single-instance/autostart/window-state plugins + ureq
     ├── tauri.conf.json   # window, tray, CSP, frontendDist → ../../dashboard
-    ├── capabilities/     # v2 permission model (core + notification)
+    ├── capabilities/     # v2 permission model (core + notification + updater + window-state + autostart)
     ├── icons/            # app/tray icon
-    └── src/main.rs       # tray + native notifications + posture poller + respond command
+    └── src/main.rs       # tray + per-finding notifications + posture tooltip + respond command + desktop polish
 ```
 
 The frontend is the suite's [dashboard](../dashboard/) loaded **directly** via
