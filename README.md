@@ -36,7 +36,9 @@ findings (which never leave your network). No build step.
 Each tool directory is self-contained and carries its own `DESIGN.md`. The full
 threat-to-defense mapping lives in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md); the
 design/decision doc for evolving the suite into endpoint protection (EPP/EDR) is in
-[`docs/ENDPOINT_PROTECTION.md`](docs/ENDPOINT_PROTECTION.md).
+[`docs/ENDPOINT_PROTECTION.md`](docs/ENDPOINT_PROTECTION.md), with the scoped Phase 1 build
+spec (Tetragon + agent + Tauri console + manual response) in
+[`docs/PHASE1_DESIGN.md`](docs/PHASE1_DESIGN.md).
 
 ## Build order
 
