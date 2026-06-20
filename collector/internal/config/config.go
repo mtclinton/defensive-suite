@@ -22,6 +22,15 @@ type Config struct {
 	MaxReports int
 	// MaxBodyBytes bounds an ingest request body.
 	MaxBodyBytes int64
+
+	// --- M3 manual response (optional; off unless both are set) ---
+
+	// AgentSocket is the agentd response unix socket the collector forwards to.
+	// Empty = /api/respond is not enabled.
+	AgentSocket string
+	// ResponseToken is the bearer token required to POST /api/respond; env-only.
+	// Empty = /api/respond fails closed.
+	ResponseToken string
 }
 
 // Defaults returns a safe baseline: loopback-bound, 30-day retention.
@@ -57,6 +66,12 @@ func Load(getenv func(string) string) Config {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.MaxReports = n
 		}
+	}
+	if v := getenv("COLLECTOR_AGENT_SOCKET"); v != "" {
+		c.AgentSocket = v
+	}
+	if v := getenv("COLLECTOR_RESPONSE_TOKEN"); v != "" {
+		c.ResponseToken = v
 	}
 	return c
 }

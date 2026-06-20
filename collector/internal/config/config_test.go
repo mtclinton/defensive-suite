@@ -39,6 +39,24 @@ func TestLoadEmptyKeepsDefaults(t *testing.T) {
 	}
 }
 
+func TestResponseDefaultsAreSafe(t *testing.T) {
+	d := Defaults()
+	if d.AgentSocket != "" || d.ResponseToken != "" {
+		t.Errorf("response should default disabled (both empty): %+v", d)
+	}
+}
+
+func TestLoadResponseEnv(t *testing.T) {
+	env := map[string]string{
+		"COLLECTOR_AGENT_SOCKET":   "/run/agentd.sock",
+		"COLLECTOR_RESPONSE_TOKEN": "resp-tok",
+	}
+	c := Load(func(k string) string { return env[k] })
+	if c.AgentSocket != "/run/agentd.sock" || c.ResponseToken != "resp-tok" {
+		t.Errorf("response env overlay: %+v", c)
+	}
+}
+
 func TestLoadBadNumberKeepsDefault(t *testing.T) {
 	c := Load(func(k string) string {
 		if k == "COLLECTOR_RETENTION_DAYS" {

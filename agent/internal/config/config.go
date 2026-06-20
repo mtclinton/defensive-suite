@@ -37,6 +37,28 @@ type Config struct {
 	BPFLoadFuncs []string
 	// WriteFuncs: kprobe function names whose path argument is a written file.
 	WriteFuncs []string
+
+	// --- M3 manual response (all default to the SAFE state) ---
+
+	// ResponseSocket is the unix socket agentd serves /respond on. Empty = the
+	// response surface is not started.
+	ResponseSocket string
+	// ResponseToken is the bearer token required to POST /respond; env-only
+	// (never a flag, so it isn't visible in the process table). Empty = the
+	// response surface fails closed.
+	ResponseToken string
+	// ResponseEnabled is the master switch. It defaults FALSE; while false, the
+	// Responder stays in DryRun and NO destructive action ever reaches the
+	// executor. Only an explicit AGENT_ENABLE_RESPONSE=1 / --enable-response
+	// flips it on.
+	ResponseEnabled bool
+	// MgmtIfaces are the management/keep-up interfaces isolate must never drop
+	// (would self-lock-out). Always includes loopback.
+	MgmtIfaces []string
+	// QuarantineDir is where the quarantine actuator moves files.
+	QuarantineDir string
+	// ResponseMaxBody bounds a /respond request body.
+	ResponseMaxBody int64
 }
 
 // Defaults returns a safe baseline for a single Linux workstation.
@@ -70,6 +92,14 @@ func Defaults() Config {
 			"security_file_permission", "security_path_truncate",
 			"security_inode_setattr",
 		},
+
+		// M3 response: SAFE defaults. No socket path, no token, response disabled
+		// → DryRun stays true and nothing destructive can run.
+		ResponseSocket:  "/run/agentd.sock",
+		ResponseEnabled: false,
+		MgmtIfaces:      []string{"lo"},
+		QuarantineDir:   "/var/lib/agentd/quarantine",
+		ResponseMaxBody: 64 << 10,
 	}
 }
 
@@ -96,7 +126,45 @@ func Load(getenv func(string) string) Config {
 			c.FlushInterval = time.Duration(n) * time.Second
 		}
 	}
+	// --- M3 response env ---
+	if v := getenv("AGENT_RESPONSE_SOCKET"); v != "" {
+		c.ResponseSocket = v
+	}
+	if v := getenv("AGENT_RESPONSE_TOKEN"); v != "" {
+		c.ResponseToken = v
+	}
+	if v := getenv("AGENT_ENABLE_RESPONSE"); v != "" {
+		c.ResponseEnabled = truthy(v)
+	}
+	if v := getenv("AGENT_MGMT_IFACES"); v != "" {
+		// Always keep loopback in the keep-up set, even if the operator forgot it.
+		c.MgmtIfaces = withLoopback(splitList(v))
+	}
+	if v := getenv("AGENT_QUARANTINE_DIR"); v != "" {
+		c.QuarantineDir = v
+	}
 	return c
+}
+
+// truthy parses a permissive boolean env value: 1/true/yes/on (any case) → true.
+func truthy(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// withLoopback ensures "lo" is present so a custom mgmt-iface list can never
+// accidentally make loopback isolable.
+func withLoopback(ifaces []string) []string {
+	for _, i := range ifaces {
+		if strings.EqualFold(strings.TrimSpace(i), "lo") {
+			return ifaces
+		}
+	}
+	return append([]string{"lo"}, ifaces...)
 }
 
 func splitList(s string) []string {

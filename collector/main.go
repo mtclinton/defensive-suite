@@ -14,11 +14,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/mtclinton/defensive-suite/collector/internal/config"
+	"github.com/mtclinton/defensive-suite/collector/internal/respond"
 	"github.com/mtclinton/defensive-suite/collector/internal/server"
 	"github.com/mtclinton/defensive-suite/collector/internal/store"
 )
@@ -46,6 +48,7 @@ func main() {
 	fs.StringVar(&cfg.DataDir, "data", cfg.DataDir, "directory for the persisted report snapshot")
 	fs.IntVar(&cfg.RetentionDays, "retention-days", cfg.RetentionDays, "drop reports older than N days (0=keep all)")
 	fs.IntVar(&cfg.MaxReports, "max-reports", cfg.MaxReports, "cap stored reports (0=unlimited)")
+	fs.StringVar(&cfg.AgentSocket, "agent-socket", cfg.AgentSocket, "agentd response unix socket (enables POST /api/respond)")
 	tokenFile := fs.String("token-file", "", "read the ingest bearer token from this file (preferred over COLLECTOR_TOKEN)")
 	_ = fs.Parse(args)
 
@@ -63,6 +66,22 @@ func main() {
 	}
 
 	srv := server.New(st, cfg.Token, cfg.MaxBodyBytes, dashboardHTML)
+
+	// Enable the manual-response proxy only when both the agentd socket and a
+	// response token are configured. Otherwise /api/respond stays absent / fails
+	// closed — the collector never proxies privileged actions by accident.
+	if cfg.AgentSocket != "" && cfg.ResponseToken != "" {
+		auditPath := filepath.Join(cfg.DataDir, "response-audit.jsonl")
+		af, err := os.OpenFile(auditPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			log.Fatalf("collector: response audit log: %v", err)
+		}
+		defer af.Close()
+		fwd := respond.NewSocketForwarder(cfg.AgentSocket, cfg.ResponseToken)
+		srv.WithResponse(cfg.ResponseToken, fwd, respond.NewAuditLog(af))
+		log.Printf("collector: manual-response proxy ENABLED → agentd %s", cfg.AgentSocket)
+	}
+
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           srv,

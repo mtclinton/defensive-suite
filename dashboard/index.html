@@ -351,6 +351,56 @@ renderAll();
     }catch(e){/* try next source */}
   }
 })();
+
+/* --- M3 manual-response panel (Tauri desktop app ONLY) ---
+   The browser / GitHub-Pages build has no Tauri IPC, so this stays hidden there.
+   In the console it calls the `respond` Rust command, which holds the response
+   token and proxies to the collector's audited POST /api/respond. Every action
+   is dry-run unless agentd response is explicitly enabled. */
+(function(){
+  var T=window.__TAURI__;
+  if(!T||!T.core||!T.core.invoke) return;
+  var invoke=T.core.invoke;
+  var style=document.createElement("style");
+  style.textContent=
+    "#respbar{position:fixed;left:0;right:0;bottom:0;z-index:9999;display:flex;gap:8px;align-items:center;"+
+    "padding:8px 12px;background:#0d1117f2;border-top:1px solid #243244;backdrop-filter:blur(4px);"+
+    "font:13px system-ui,sans-serif;color:#cdd9e5}"+
+    "#respbar select,#respbar input{background:#161b22;color:#cdd9e5;border:1px solid #2a3441;border-radius:6px;padding:5px 8px}"+
+    "#respbar input{flex:1;min-width:60px}"+
+    "#respbar button{background:#33d6c0;color:#06231f;border:0;border-radius:6px;padding:6px 14px;font-weight:600;cursor:pointer}"+
+    "#respbar #rb-out{flex:2;min-width:80px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
+  document.head.appendChild(style);
+  var bar=document.createElement("div");
+  bar.id="respbar";
+  bar.innerHTML=
+    '<strong>Respond</strong>'+
+    '<select id="rb-action">'+
+      '<option value="kill">kill (PID)</option>'+
+      '<option value="isolate">isolate (iface)</option>'+
+      '<option value="quarantine">quarantine (path)</option>'+
+      '<option value="revoke-key">revoke-key (authorized_keys)</option>'+
+      '<option value="block-hash">block-hash (sha256)</option>'+
+    '</select>'+
+    '<input id="rb-target" placeholder="target (PID / iface / path / sha256)" />'+
+    '<input id="rb-reason" placeholder="reason (audited)" />'+
+    '<button id="rb-run">Run</button>'+
+    '<span id="rb-out"></span>';
+  document.body.appendChild(bar);
+  var out=bar.querySelector("#rb-out");
+  bar.querySelector("#rb-run").addEventListener("click",async function(){
+    var action=bar.querySelector("#rb-action").value;
+    var target=bar.querySelector("#rb-target").value.trim();
+    var reason=bar.querySelector("#rb-reason").value.trim();
+    if(!target){out.textContent="enter a target";return;}
+    if(!window.confirm("Send "+action+' on "'+target+'"?\n(dry-run unless agentd response is enabled)')) return;
+    out.textContent="working…";
+    try{
+      var res=await invoke("respond",{action:action,target:target,reason:reason});
+      out.textContent=(res.dry_run?"[DRY-RUN] ":"")+(res.ok?"✓ ":"✗ ")+(res.detail||JSON.stringify(res));
+    }catch(e){ out.textContent="error: "+e; }
+  });
+})();
 </script>
 </body>
 </html>

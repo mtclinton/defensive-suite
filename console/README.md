@@ -1,25 +1,35 @@
-# console — desktop app (Phase 1, M2)
+# console — desktop app (Phase 1, M2 + M3)
 
 A native desktop console for the [defensive-suite](../README.md), built with
 **Tauri v2** (not Electron): it reuses the [dashboard](../dashboard/) as its UI,
 adds a **system-tray** icon and **native notifications**, and shows your *live*
 collector data — at ~3 MB and a fraction of Electron's memory/attack surface.
 
-**M2 is read-only.** The manual-response panel (kill / isolate / quarantine /
-revoke / block) lands in **M3**, and — by design — the GUI will *request* actions
-from the privileged root `agentd`, never perform them itself (see
-[`../docs/PHASE1_DESIGN.md`](../docs/PHASE1_DESIGN.md)).
+**M3 adds a manual-response panel** (kill / isolate / quarantine / revoke-key /
+block-hash). By design the GUI *requests* actions — the `respond` Rust command
+holds the response token and POSTs to the collector's audited `/api/respond`,
+which forwards to the privileged root `agentd`. The webview never holds the token
+and the console never performs a privileged action itself; `agentd` guards,
+audits, and stays **dry-run unless explicitly enabled** (see
+[`../docs/PHASE1_DESIGN.md`](../docs/PHASE1_DESIGN.md) and
+[`../agent/deploy/RESPONSE.md`](../agent/deploy/RESPONSE.md)).
 
 ```
 console/
 ├── dist/                 # the frontend = the dashboard (mirror of ../dashboard/index.html)
 └── src-tauri/
-    ├── Cargo.toml        # tauri v2 + notification plugin + ureq (collector poll)
+    ├── Cargo.toml        # tauri v2 + notification plugin + ureq (collector poll/respond)
     ├── tauri.conf.json   # window, tray, CSP, frontendDist
     ├── capabilities/     # v2 permission model (core + notification)
     ├── icons/            # app/tray icon
-    └── src/main.rs       # tray + native notifications + posture poller
+    └── src/main.rs       # tray + native notifications + posture poller + respond command
 ```
+
+The response panel only appears in the desktop app (it needs Tauri IPC); the same
+`dist/index.html` in a plain browser shows no response controls. Set
+`DSUITE_RESPONSE_TOKEN` (matching the collector's `COLLECTOR_RESPONSE_TOKEN`) in
+the console's environment to enable it; without it the panel reports "response is
+disabled".
 
 ## Build & run (Linux desktop target)
 

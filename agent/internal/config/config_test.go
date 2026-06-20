@@ -45,3 +45,86 @@ func TestLoadEmptyKeepsDefaults(t *testing.T) {
 		t.Errorf("empty env should keep defaults: %+v", c)
 	}
 }
+
+func TestResponseDefaultsAreSafe(t *testing.T) {
+	d := Defaults()
+	if d.ResponseEnabled {
+		t.Error("ResponseEnabled must default to FALSE (dry-run stays on)")
+	}
+	if d.ResponseToken != "" {
+		t.Error("ResponseToken should default empty (response fails closed)")
+	}
+	if d.ResponseSocket == "" || d.QuarantineDir == "" || d.ResponseMaxBody <= 0 {
+		t.Errorf("response defaults=%+v", d)
+	}
+	if len(d.MgmtIfaces) == 0 || d.MgmtIfaces[0] != "lo" {
+		t.Errorf("loopback should be a default mgmt iface: %v", d.MgmtIfaces)
+	}
+}
+
+func TestLoadResponseEnv(t *testing.T) {
+	env := map[string]string{
+		"AGENT_RESPONSE_SOCKET": "/run/custom.sock",
+		"AGENT_RESPONSE_TOKEN":  "resp-secret",
+		"AGENT_ENABLE_RESPONSE": "1",
+		"AGENT_MGMT_IFACES":     "tailscale0, eth0",
+		"AGENT_QUARANTINE_DIR":  "/srv/quarantine",
+	}
+	c := Load(func(k string) string { return env[k] })
+	if c.ResponseSocket != "/run/custom.sock" || c.ResponseToken != "resp-secret" {
+		t.Errorf("response socket/token=%+v", c)
+	}
+	if !c.ResponseEnabled {
+		t.Error("AGENT_ENABLE_RESPONSE=1 should enable response")
+	}
+	if c.QuarantineDir != "/srv/quarantine" {
+		t.Errorf("quarantine dir=%q", c.QuarantineDir)
+	}
+	// loopback auto-added in front of the operator's list.
+	if len(c.MgmtIfaces) != 3 || c.MgmtIfaces[0] != "lo" {
+		t.Errorf("mgmt ifaces=%v (loopback should be prepended)", c.MgmtIfaces)
+	}
+}
+
+func TestEnableResponseTruthiness(t *testing.T) {
+	for _, v := range []string{"1", "true", "TRUE", "yes", "on"} {
+		c := Load(func(k string) string {
+			if k == "AGENT_ENABLE_RESPONSE" {
+				return v
+			}
+			return ""
+		})
+		if !c.ResponseEnabled {
+			t.Errorf("%q should enable response", v)
+		}
+	}
+	for _, v := range []string{"0", "false", "no", "off", "", "nonsense"} {
+		c := Load(func(k string) string {
+			if k == "AGENT_ENABLE_RESPONSE" {
+				return v
+			}
+			return ""
+		})
+		if c.ResponseEnabled {
+			t.Errorf("%q should NOT enable response (must default safe)", v)
+		}
+	}
+}
+
+func TestMgmtIfacesAlwaysKeepsLoopback(t *testing.T) {
+	c := Load(func(k string) string {
+		if k == "AGENT_MGMT_IFACES" {
+			return "eth0" // operator forgot loopback
+		}
+		return ""
+	})
+	found := false
+	for _, i := range c.MgmtIfaces {
+		if i == "lo" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("loopback must always be kept up: %v", c.MgmtIfaces)
+	}
+}

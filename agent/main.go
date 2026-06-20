@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -21,6 +22,7 @@ import (
 	"github.com/mtclinton/defensive-suite/agent/internal/config"
 	"github.com/mtclinton/defensive-suite/agent/internal/pipeline"
 	"github.com/mtclinton/defensive-suite/agent/internal/report"
+	"github.com/mtclinton/defensive-suite/agent/internal/respond"
 )
 
 var version = "0.1.0"
@@ -59,10 +61,19 @@ usage:
 
 flags (env AGENT_* also apply):
   run:  -tetragon-log PATH   -collector URL
+        -response-socket PATH   serve the manual-response API on a unix socket
+        -enable-response        ACTUALLY perform actions (default OFF → dry-run)
   scan: -file PATH (- = stdin)  -collector URL  -no-post  -format text|json
 
 env: AGENT_TETRAGON_LOG, AGENT_COLLECTOR_URL, AGENT_COLLECTOR_AUTH (e.g. "Bearer …"),
-     AGENT_HOST, AGENT_BPF_ALLOWLIST, AGENT_FLUSH_SECONDS
+     AGENT_HOST, AGENT_BPF_ALLOWLIST, AGENT_FLUSH_SECONDS,
+     AGENT_RESPONSE_SOCKET, AGENT_RESPONSE_TOKEN, AGENT_ENABLE_RESPONSE,
+     AGENT_MGMT_IFACES, AGENT_QUARANTINE_DIR
+
+Manual response is OFF by default: without --enable-response (or
+AGENT_ENABLE_RESPONSE) the responder stays in DRY-RUN and never touches the
+system — it returns what it WOULD do, audited. Enabling it requires root and is
+reviewed in deploy/RESPONSE.md before running on a real host.
 `)
 }
 
@@ -116,6 +127,8 @@ func cmdRun(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	logPath := fs.String("tetragon-log", "", "override the Tetragon JSON export path")
 	collector := fs.String("collector", "", "override collector URL")
+	respSocket := fs.String("response-socket", "", "serve the manual-response API on this unix socket")
+	enableResp := fs.Bool("enable-response", false, "ACTUALLY perform response actions (default off → dry-run)")
 	_ = fs.Parse(args)
 
 	cfg := config.Load(os.Getenv)
@@ -124,6 +137,14 @@ func cmdRun(args []string) int {
 	}
 	if *collector != "" {
 		cfg.CollectorURL = *collector
+	}
+	if *respSocket != "" {
+		cfg.ResponseSocket = *respSocket
+	}
+	// The flag can only ENABLE; it never disables what the env enabled. Either
+	// source turning it on is sufficient (and still requires a token + root).
+	if *enableResp {
+		cfg.ResponseEnabled = true
 	}
 
 	buf := pipeline.NewBuffer(cfg.BufferMax)
@@ -171,6 +192,13 @@ func cmdRun(args []string) int {
 		}
 	}()
 
+	if cfg.ResponseSocket != "" {
+		if err := startResponse(ctx, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "agentd: response:", err)
+			return 1
+		}
+	}
+
 	fmt.Fprintf(os.Stderr, "agentd %s: tailing %s → %s (observe mode)\n",
 		version, cfg.TetragonLog, orNone(cfg.CollectorURL))
 	_ = pipeline.Tail(ctx, cfg.TetragonLog, time.Second, func(line string) {
@@ -185,6 +213,65 @@ func orNone(s string) string {
 		return "(no collector configured)"
 	}
 	return s
+}
+
+// startResponse stands up the manual-response unix socket and serves it for the
+// lifetime of ctx. The Responder is built DRY-RUN unless cfg.ResponseEnabled is
+// true, so by default it never touches the system. A missing response token is
+// fatal: a privileged socket with no auth must not start.
+func startResponse(ctx context.Context, cfg config.Config) error {
+	if cfg.ResponseToken == "" {
+		return fmt.Errorf("refusing to serve %s without AGENT_RESPONSE_TOKEN set", cfg.ResponseSocket)
+	}
+
+	// Append-only audit log next to the socket-owner's state dir.
+	auditPath := filepath.Join(filepath.Dir(cfg.QuarantineDir), "response-audit.jsonl")
+	if err := os.MkdirAll(filepath.Dir(auditPath), 0o700); err != nil {
+		return fmt.Errorf("audit dir: %w", err)
+	}
+	auditFile, err := os.OpenFile(auditPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("audit log: %w", err)
+	}
+
+	guards := respond.DefaultGuards()
+	guards.MgmtIfaces = cfg.MgmtIfaces
+	guards.QuarantineDir = cfg.QuarantineDir
+	guards.SelfPID = os.Getpid()
+
+	// The single safety gate: DryRun is the NEGATION of ResponseEnabled. With
+	// ResponseEnabled=false (the default), DryRun=true → executor never runs.
+	dryRun := !cfg.ResponseEnabled
+	var exec respond.Executor
+	if dryRun {
+		// Dry-run never executes, but the interface needs a value; use the inert
+		// fake so even a coding error can't reach the real one.
+		exec = &respond.FakeExecutor{}
+	} else {
+		exec = respond.NewRealExecutor(guards)
+	}
+
+	r := respond.NewResponder(exec, respond.NewAuditLog(auditFile), dryRun, guards, time.Now)
+	h := respond.NewHandler(r, cfg.ResponseToken, cfg.ResponseMaxBody)
+
+	ln, err := respond.Listen(cfg.ResponseSocket)
+	if err != nil {
+		return err
+	}
+
+	mode := "DRY-RUN (no destructive action)"
+	if !dryRun {
+		mode = "ENABLED — actions are LIVE"
+	}
+	fmt.Fprintf(os.Stderr, "agentd: response socket %s serving (%s)\n", cfg.ResponseSocket, mode)
+
+	go func() {
+		if err := respond.Serve(ctx, ln, h, cfg.ResponseSocket); err != nil {
+			fmt.Fprintln(os.Stderr, "agentd: response serve:", err)
+		}
+		_ = auditFile.Close()
+	}()
+	return nil
 }
 
 func printText(w io.Writer, rep report.Report) {

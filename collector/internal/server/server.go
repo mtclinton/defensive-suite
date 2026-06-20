@@ -5,12 +5,14 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/mtclinton/defensive-suite/collector/internal/respond"
 	"github.com/mtclinton/defensive-suite/collector/internal/store"
 )
 
@@ -21,6 +23,25 @@ type Server struct {
 	maxBody   int64
 	dashboard []byte
 	mux       *http.ServeMux
+
+	// --- M3 manual response (optional) ---
+	// respToken gates POST /api/respond (empty = response disabled, fails closed).
+	respToken string
+	// forwarder ships the request to agentd; nil = response not configured.
+	forwarder respond.Forwarder
+	// respAudit records every response request+result (append-only).
+	respAudit *respond.AuditLog
+}
+
+// WithResponse enables POST /api/respond: requests authed with respToken are
+// forwarded to agentd via fwd and recorded in audit. A nil forwarder or empty
+// token leaves the endpoint failing closed. Returns the server for chaining.
+func (s *Server) WithResponse(respToken string, fwd respond.Forwarder, audit *respond.AuditLog) *Server {
+	s.respToken = respToken
+	s.forwarder = fwd
+	s.respAudit = audit
+	s.mux.HandleFunc("/api/respond", s.handleRespond)
+	return s
 }
 
 // New builds the handler. token gates /ingest (empty = ingest disabled).
@@ -82,6 +103,60 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	s.store.AddReport(rep)
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "tool": rep.Tool, "findings": len(rep.Findings)})
+}
+
+// handleRespond authenticates the operator, forwards the response Request to
+// agentd, records the request+result, and returns the Result. The collector
+// performs NO privileged action itself — it is a thin, audited proxy.
+func (s *Server) handleRespond(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.respToken == "" || s.forwarder == nil {
+		http.Error(w, "respond disabled: collector response not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if !authOK(r, s.respToken) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBody)
+	var req respond.Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Action == "" || req.Target == "" {
+		http.Error(w, "request missing action/target", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	res, err := s.forwarder.Forward(ctx, req)
+
+	rec := respond.AuditRecord{
+		Time:   time.Now().UTC(),
+		Action: req.Action,
+		Target: req.Target,
+		Reason: req.Reason,
+		Actor:  req.Actor,
+		OK:     res.OK,
+		DryRun: res.DryRun,
+		Detail: res.Detail,
+	}
+	if err != nil {
+		rec.Err = err.Error()
+	}
+	_ = s.respAudit.Write(rec)
+
+	if err != nil {
+		// agentd unreachable / errored → 502 Bad Gateway.
+		http.Error(w, "agentd: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleFindings(w http.ResponseWriter, r *http.Request) {
