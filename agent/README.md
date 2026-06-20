@@ -24,9 +24,15 @@ Tetragon ──JSON export──▶ agentd ──findings──▶ collector ─
 | `realtime.exec` | exec from a staging dir (`/tmp`, `/dev/shm`, `/var/tmp`) | medium | T1059 |
 | `realtime.exec` | fileless exec (`(deleted)` / `memfd:` binary) | high | T1620 |
 | `realtime.bpf` | eBPF program load by a non-allowlisted loader | high | T1014 |
-| `realtime.write` | write to a trust-path file (ld.so.preload / PAM / `authorized_keys` / sshd_config) | critical | T1574.006 · T1556.003 · T1098.004 |
+| `realtime.write` | trust-path write — ld.so.preload/conf.d · PAM · `authorized_keys` · sshd_config · sudoers | critical | T1574.006 · T1556.003 · T1098.004 · T1548.003 |
+| `realtime.write` | **persistence** write — systemd · cron · shell-init · rc.local/init.d · udev · kernel-modules · XDG-autostart | high | T1543.002 · T1053.003 · T1546.004 · T1037.004 · T1546.017 · T1547.006 · T1547.013 |
 
-These mirror the suite's existing detections, now evaluated live on the event stream.
+All writes are mask-gated (only `MAY_WRITE`, so reads of these files never flag). The
+persistence class is rated **High** rather than Critical because package managers and
+admins legitimately write systemd units / cron jobs too — surfaced, not crying wolf —
+and we watch the admin/attacker-primary `/etc` locations, skipping package-owned dirs
+(`/usr/lib/systemd`, `/lib/udev`) that would flood on every install. These mirror the
+suite's existing detections, now evaluated live on the event stream.
 
 ## Run
 

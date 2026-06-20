@@ -11,9 +11,13 @@ func testCfg() Config {
 	return Config{
 		StagingDirs: []string{"/tmp/", "/dev/shm/", "/var/tmp/"},
 		SensitivePaths: []string{
-			"/etc/ld.so.preload",
+			"/etc/ld.so.preload", "/etc/ld.so.conf.d/",
 			"*/.ssh/authorized_keys", "*/.ssh/authorized_keys2",
-			"/lib64/security/",
+			"/lib64/security/", "/etc/ssh/sshd_config", "/etc/sudoers.d/",
+			// persistence classes
+			"/etc/systemd/system/", "/etc/cron.d/", "/etc/profile.d/",
+			"*/.bashrc", "/etc/rc.local", "/etc/init.d/", "/etc/udev/rules.d/",
+			"/etc/modprobe.d/", "/etc/xdg/autostart/",
 		},
 		BPFLoadFuncs: []string{"security_bpf_prog_load", "bpf_check"},
 		WriteFuncs:   []string{"security_file_permission", "security_path_truncate"},
@@ -156,5 +160,75 @@ func TestWriteNonSensitiveAndExitNoFinding(t *testing.T) {
 	}
 	if f := Eval(tetragon.Event{Kind: "exit", Binary: "/usr/bin/ls"}, testCfg()); len(f) != 0 {
 		t.Errorf("exit should yield nothing: %+v", f)
+	}
+}
+
+// Persistence-class writes are caught as High (not Critical — package managers
+// write these too) with the correct ATT&CK technique, covering systemd / cron /
+// shell-init / rc.local / udev across system and per-user paths.
+func TestPersistenceCoverage(t *testing.T) {
+	const maskWrite = 2
+	cases := []struct{ path, tech string }{
+		{"/etc/systemd/system/evil.service", "T1543.002"},
+		{"/etc/cron.d/evil", "T1053.003"},
+		{"/etc/profile.d/evil.sh", "T1546.004"},
+		{"/home/alice/.bashrc", "T1546.004"}, // per-user, via suffix
+		{"/etc/rc.local", "T1037.004"},
+		{"/etc/init.d/evil", "T1037.004"},
+		{"/etc/udev/rules.d/99-evil.rules", "T1546.017"},
+		{"/etc/modprobe.d/evil.conf", "T1547.006"}, // kernel module persistence
+		{"/etc/xdg/autostart/evil.desktop", "T1547.013"},
+	}
+	for _, c := range cases {
+		f := only(t, Eval(tetragon.Event{
+			Kind: "kprobe", Function: "security_file_permission",
+			Binary: "/usr/bin/tee", Paths: []string{c.path}, Ints: []int64{maskWrite},
+		}, testCfg()))
+		if f.Severity != report.SeverityHigh || f.Technique != c.tech || f.Check != "realtime.write" {
+			t.Errorf("write %s → %+v (want High/%s/realtime.write)", c.path, f, c.tech)
+		}
+	}
+}
+
+// The new high-fidelity trust paths stay Critical: sudoers (privesc persistence)
+// and ld.so.conf.d (linker path injection) are high-confidence, like ld.so.preload.
+func TestNewCriticalTrustPaths(t *testing.T) {
+	const maskWrite = 2
+	cases := []struct{ path, tech string }{
+		{"/etc/sudoers.d/evil", "T1548.003"},
+		{"/etc/ld.so.conf.d/evil.conf", "T1574.006"},
+	}
+	for _, c := range cases {
+		f := only(t, Eval(tetragon.Event{
+			Kind: "kprobe", Function: "security_file_permission",
+			Binary: "/usr/bin/tee", Paths: []string{c.path}, Ints: []int64{maskWrite},
+		}, testCfg()))
+		if f.Severity != report.SeverityCritical || f.Technique != c.tech {
+			t.Errorf("write %s → %+v (want Critical/%s)", c.path, f, c.tech)
+		}
+	}
+}
+
+// Persistence writes stay mask-gated: a READ of a shell rc (e.g. a login sourcing
+// ~/.bashrc) must not flag — the FP-hardening must apply to the new paths too.
+func TestPersistenceReadNotFlagged(t *testing.T) {
+	const maskRead = 4
+	if r := Eval(tetragon.Event{
+		Kind: "kprobe", Function: "security_file_permission",
+		Binary: "/bin/bash", Paths: []string{"/home/alice/.bashrc"}, Ints: []int64{maskRead},
+	}, testCfg()); len(r) != 0 {
+		t.Errorf("reading a shell rc must NOT flag: %+v", r)
+	}
+}
+
+// sshd_config stays Critical (auth config), not downgraded into the persistence tier.
+func TestSshdConfigStaysCritical(t *testing.T) {
+	const maskWrite = 2
+	f := only(t, Eval(tetragon.Event{
+		Kind: "kprobe", Function: "security_file_permission",
+		Binary: "/usr/bin/vi", Paths: []string{"/etc/ssh/sshd_config"}, Ints: []int64{maskWrite},
+	}, testCfg()))
+	if f.Severity != report.SeverityCritical {
+		t.Errorf("sshd_config write should stay Critical: %+v", f)
 	}
 }

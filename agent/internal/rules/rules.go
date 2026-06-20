@@ -72,9 +72,13 @@ func kprobeRules(e tetragon.Event, cfg Config) []report.Finding {
 	if contains(cfg.WriteFuncs, e.Function) && writeIntent(e) {
 		for _, p := range e.Paths {
 			if match, ok := sensitiveMatch(p, cfg.SensitivePaths); ok {
+				sev := severityFor(match)
+				title := "write to a persistence path"
+				if sev == report.SeverityCritical {
+					title = "write to a trust-path file"
+				}
 				out = append(out, report.Finding{
-					Check: "realtime.write", Severity: report.SeverityCritical,
-					Title:  "write to a trust-path file",
+					Check: "realtime.write", Severity: sev, Title: title,
 					Detail: fmt.Sprintf("%s wrote %s (fn=%s pid=%d)", e.Binary, p, e.Function, e.Pid),
 					Path:   p, Technique: techniqueFor(match),
 				})
@@ -82,6 +86,37 @@ func kprobeRules(e tetragon.Event, cfg Config) []report.Finding {
 		}
 	}
 	return out
+}
+
+// severityFor tiers a sensitive-path write. The high-fidelity trust paths
+// (linker preload, PAM, the PAM module dirs, SSH keys, sshd_config) are almost
+// never legitimately written → Critical. The persistence paths (systemd, cron,
+// shell init, rc.local, udev) are also written by package managers / admins, so
+// they are High — surfaced, but not crying Critical on every apt install.
+func severityFor(match string) report.Severity {
+	switch {
+	case strings.Contains(match, "ld.so"),
+		strings.Contains(match, "pam.d"),
+		strings.Contains(match, "security/"),
+		strings.Contains(match, "authorized_keys"),
+		strings.Contains(match, ".ssh/"),
+		strings.Contains(match, "sshd_config"),
+		strings.Contains(match, "sudoers"):
+		return report.SeverityCritical
+	default:
+		return report.SeverityHigh
+	}
+}
+
+// isShellInit reports whether a sensitive entry is a shell startup file (system
+// or per-user) — modifying one is shell-configuration persistence (T1546.004).
+func isShellInit(s string) bool {
+	for _, k := range []string{"profile", "bashrc", "bash_login", "zshrc", "zshenv", "zprofile"} {
+		if strings.Contains(s, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeIntent gates a trust-path "write" finding on actual write intent.
@@ -153,13 +188,29 @@ func sensitiveMatch(path string, sensitive []string) (string, bool) {
 
 func techniqueFor(sensitive string) string {
 	switch {
-	case sensitive == "/etc/ld.so.preload":
-		return "T1574.006"
+	case strings.Contains(sensitive, "ld.so"):
+		return "T1574.006" // hijack execution flow: dynamic linker (preload / conf.d)
 	case strings.Contains(sensitive, "pam.d") || strings.Contains(sensitive, "security/"):
-		return "T1556.003"
+		return "T1556.003" // modify authentication process: PAM
 	case strings.Contains(sensitive, "authorized_keys") || strings.Contains(sensitive, ".ssh/"):
-		return "T1098.004"
+		return "T1098.004" // account manipulation: SSH authorized_keys
+	case strings.Contains(sensitive, "sudoers"):
+		return "T1548.003" // abuse elevation control: sudo and sudo caching
+	case strings.Contains(sensitive, "systemd"):
+		return "T1543.002" // create or modify system process: systemd service
+	case strings.Contains(sensitive, "cron"):
+		return "T1053.003" // scheduled task/job: cron
+	case strings.Contains(sensitive, "modprobe") || strings.Contains(sensitive, "modules"):
+		return "T1547.006" // boot or logon autostart: kernel modules and extensions
+	case strings.Contains(sensitive, "udev"):
+		return "T1546.017" // event triggered execution: udev rules
+	case strings.Contains(sensitive, "autostart"):
+		return "T1547.013" // boot or logon autostart: XDG autostart entries
+	case strings.Contains(sensitive, "rc.local") || strings.Contains(sensitive, "init.d"):
+		return "T1037.004" // boot or logon init scripts: RC scripts
+	case isShellInit(sensitive):
+		return "T1546.004" // event triggered execution: Unix shell config
 	default:
-		return "T1565.001"
+		return "T1565.001" // stored data manipulation (e.g. sshd_config tamper)
 	}
 }

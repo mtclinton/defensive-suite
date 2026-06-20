@@ -71,15 +71,34 @@ func Defaults() Config {
 		BufferMax:     5000,
 		StagingDirs:   []string{"/tmp/", "/dev/shm/", "/var/tmp/"},
 		SensitivePaths: []string{
-			"/etc/ld.so.preload",
-			"/etc/pam.d/",
+			// --- high-fidelity trust paths (rule emits Critical) ---
+			// Almost never legitimately written; a write here is high-confidence.
+			"/etc/ld.so.preload", "/etc/ld.so.conf.d/", // dynamic linker — T1574.006
+			"/etc/pam.d/", // PAM — T1556.003
 			// Suffix entries (leading "*") catch every user's SSH key files,
 			// including /root and /home/<user>, not just the exact /root path.
-			"*/.ssh/authorized_keys",
-			"*/.ssh/authorized_keys2",
+			"*/.ssh/authorized_keys", "*/.ssh/authorized_keys2", // SSH keys — T1098.004
 			"/lib/security/", "/lib64/security/",
 			"/usr/lib64/security/", "/usr/lib/x86_64-linux-gnu/security/",
-			"/etc/ssh/sshd_config",
+			"/etc/ssh/sshd_config", "/etc/ssh/sshd_config.d/",
+			"/etc/sudoers", "/etc/sudoers.d/", // sudo privesc persistence — T1548.003
+
+			// --- persistence paths (rule emits High) ---
+			// Also written by package managers / admins, so High (not Critical). We
+			// watch the ADMIN/attacker-primary locations under /etc and skip the
+			// package-owned dirs (/usr/lib/systemd, /lib/udev, …) that would flood
+			// on every package install with little added value.
+			"/etc/systemd/system/", "/etc/systemd/user/", // systemd — T1543.002
+			"/etc/crontab", "/etc/cron.d/", "/etc/cron.hourly/", "/etc/cron.daily/",
+			"/etc/cron.weekly/", "/etc/cron.monthly/", "/var/spool/cron/", // cron — T1053.003
+			"/etc/profile", "/etc/profile.d/", "/etc/bash.bashrc", "/etc/bashrc",
+			"/etc/zsh/zshrc", "/etc/zsh/zshenv",
+			"*/.bashrc", "*/.bash_profile", "*/.bash_login", "*/.profile",
+			"*/.zshrc", "*/.zshenv", "*/.zprofile", // shell init — T1546.004
+			"/etc/rc.local", "/etc/init.d/", // boot init scripts — T1037.004
+			"/etc/udev/rules.d/",                                       // udev rules — T1546.017
+			"/etc/modules-load.d/", "/etc/modprobe.d/", "/etc/modules", // kernel modules — T1547.006
+			"/etc/xdg/autostart/", // XDG autostart — T1547.013
 		},
 		BPFLoaderAllowlist: []string{},
 		BPFLoadFuncs:       []string{"security_bpf_prog_load", "bpf_check", "__sys_bpf"},

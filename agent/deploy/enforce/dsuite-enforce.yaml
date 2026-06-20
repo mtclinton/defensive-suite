@@ -128,6 +128,32 @@ spec:
                 - "/lib64/security/"
                 - "/usr/lib64/security/"
                 - "/etc/ssh/sshd_config"
+                - "/etc/ssh/sshd_config.d/"
+                - "/etc/sudoers"
+                - "/etc/sudoers.d/"
+                - "/etc/ld.so.conf.d/"
+                # persistence (High, not Critical — package managers write some too).
+                # Admin/attacker-primary /etc locations only; package-owned dirs
+                # (/usr/lib/systemd, /lib/udev …) are skipped to avoid install noise.
+                - "/etc/systemd/system/"
+                - "/etc/systemd/user/"
+                - "/etc/crontab"
+                - "/etc/cron.d/"
+                - "/etc/cron.hourly/"
+                - "/etc/cron.daily/"
+                - "/etc/cron.weekly/"
+                - "/etc/cron.monthly/"
+                - "/var/spool/cron/"
+                - "/etc/profile"
+                - "/etc/profile.d/"
+                - "/etc/bash.bashrc"
+                - "/etc/rc.local"
+                - "/etc/init.d/"
+                - "/etc/udev/rules.d/"
+                - "/etc/modules-load.d/"
+                - "/etc/modprobe.d/"
+                - "/etc/modules"
+                - "/etc/xdg/autostart/"
             - index: 1
               operator: "Mask"
               values:
@@ -139,6 +165,14 @@ spec:
               values:
                 - "/.ssh/authorized_keys"
                 - "/.ssh/authorized_keys2"
+                # per-user shell init (T1546.004)
+                - "/.bashrc"
+                - "/.bash_profile"
+                - "/.bash_login"
+                - "/.profile"
+                - "/.zshrc"
+                - "/.zshenv"
+                - "/.zprofile"
             - index: 1
               operator: "Mask"
               values:
