@@ -336,16 +336,20 @@ $("#reset").addEventListener("click",()=>{DATA=SAMPLE.slice();renderAll();docume
 
 renderAll();
 
-/* When this page is served by the defensive-suite collector it pulls live
-   findings from its API; on static hosting (GitHub Pages) that request 404s and
-   we keep the sample data. Real findings never leave the browser either way. */
+/* Pull live findings from the collector: a relative path when the collector
+   serves this page, or the local collector when this runs as the Tauri desktop
+   app / a local file. On static hosting (GitHub Pages) every attempt fails and
+   we keep the sample data. Real findings never leave the device either way. */
 (async function(){
-  try{
-    const res = await fetch("api/findings",{cache:"no-store"});
-    if(!res.ok) return;
-    const live = ingest(await res.json());
-    if(live.length){DATA=live;document.querySelector(".banner b").textContent="live";renderAll();}
-  }catch(e){/* static host — keep sample data */}
+  const urls=["api/findings","http://127.0.0.1:8787/api/findings","http://localhost:8787/api/findings"];
+  for(const u of urls){
+    try{
+      const res=await fetch(u,{cache:"no-store"});
+      if(!res.ok) continue;
+      const live=ingest(await res.json());
+      if(live.length){DATA=live;document.querySelector(".banner b").textContent="live";renderAll();return;}
+    }catch(e){/* try next source */}
+  }
 })();
 </script>
 </body>

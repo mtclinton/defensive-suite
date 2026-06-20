@@ -1,0 +1,23 @@
+[package]
+name = "dsuite-console"
+version = "0.1.0"
+edition = "2021"
+description = "defensive-suite desktop console"
+authors = ["defensive-suite"]
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# tiny blocking HTTP client to poll the local collector from the background thread
+ureq = "2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
