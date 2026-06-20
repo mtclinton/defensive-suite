@@ -80,7 +80,8 @@ flags (env AGENT_* also apply):
 env: AGENT_TETRAGON_LOG, AGENT_COLLECTOR_URL, AGENT_COLLECTOR_AUTH (e.g. "Bearer …"),
      AGENT_HOST, AGENT_BPF_ALLOWLIST, AGENT_FLUSH_SECONDS,
      AGENT_RESPONSE_SOCKET, AGENT_RESPONSE_TOKEN, AGENT_ENABLE_RESPONSE,
-     AGENT_MGMT_IFACES, AGENT_QUARANTINE_DIR
+     AGENT_MGMT_IFACES, AGENT_QUARANTINE_DIR,
+     AGENT_RESPONSE_KILLSWITCH (touch to disarm ALL response), AGENT_RESPONSE_RATE (e.g. 10/60s)
 
 Manual response is OFF by default: without --enable-response (or
 AGENT_ENABLE_RESPONSE) the responder stays in DRY-RUN and never touches the
@@ -370,6 +371,12 @@ func startResponse(ctx context.Context, cfg config.Config) error {
 	}
 
 	r := respond.NewResponder(exec, respond.NewAuditLog(auditFile), dryRun, guards, time.Now)
+	// BRAKES on the weaponizable primitive (apply in dry-run too, so the operator
+	// sees the same refusals they'd get live):
+	//   - kill-switch: `touch` the file to instantly disarm ALL response.
+	//   - rate limit: cap live executions per window against a hijacked mass-action.
+	r.WithKillSwitch(cfg.ResponseKillSwitch, nil)
+	r.WithRateLimit(cfg.ResponseRateMax, cfg.ResponseRateWindow)
 	h := respond.NewHandler(r, cfg.ResponseToken, cfg.ResponseMaxBody)
 
 	ln, err := respond.Listen(cfg.ResponseSocket)
@@ -382,6 +389,12 @@ func startResponse(ctx context.Context, cfg config.Config) error {
 		mode = "ENABLED — actions are LIVE"
 	}
 	fmt.Fprintf(os.Stderr, "agentd: response socket %s serving (%s)\n", cfg.ResponseSocket, mode)
+	if cfg.ResponseKillSwitch != "" {
+		fmt.Fprintf(os.Stderr, "agentd: response kill-switch: touch %s to instantly disarm ALL response\n", cfg.ResponseKillSwitch)
+	}
+	if cfg.ResponseRateMax > 0 {
+		fmt.Fprintf(os.Stderr, "agentd: response rate limit: %d live actions per %s\n", cfg.ResponseRateMax, cfg.ResponseRateWindow)
+	}
 
 	go func() {
 		if err := respond.Serve(ctx, ln, h, cfg.ResponseSocket); err != nil {

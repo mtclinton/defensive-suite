@@ -9,16 +9,24 @@
 #
 # It proves the live loop CI cannot:
 #   stage 2  detect   — a synthetic eBPF load is reported as a finding in the collector
-#   stage 3  enforce  — a NON-allowlisted eBPF load is SIGKILLed; Tetragon survives
+#   stage 3  enforce  — a NON-allowlisted eBPF load is SIGKILLed; Tetragon survives;
+#                       AND the implant program is proven ABSENT (bpftool count
+#                       before/after) — or HONESTLY warns if SIGKILL killed the
+#                       loader but the program loaded anyway (the async caveat).
+#   stage 3b enforce-override — (optional, gated on CONFIG_BPF_KPROBE_OVERRIDE)
+#                       the Override variant BLOCKS the load (-EPERM): loadbpf
+#                       exits 1, no new prog resident.
 #   stage 4  respond  — (optional) a throwaway process is killed via collector→agentd
 #
 # Prerequisites (install first; see agent/deploy/ENFORCE.md step b):
 #   - a running `tetragon` service with JSON file export enabled, the `tetra` CLI
 #   - go (build), cc + kernel headers / linux-libc-dev (compile the loader), curl
+#   - bpftool (to prove the implant program is absent after enforcement)
 #
 # Usage:
-#   sudo ./validate.sh -y                 # detect + enforce
+#   sudo ./validate.sh -y                 # detect + enforce (+ implant-absent check)
 #   sudo ./validate.sh -y --with-response # also the live kill (M3)
+#   sudo ./validate.sh -y --with-override # also stage 3b: the Override TRUE block
 #   Flags: --keep (leave everything up) --force-baremetal (skip the VM guard)
 set -uo pipefail
 
@@ -26,14 +34,15 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SELF/.." && pwd)"
 PORT="${DSUITE_VALIDATE_PORT:-8799}"
 TLOG="${AGENT_TETRAGON_LOG:-/var/log/tetragon/tetragon.log}"
-YES=0 WITH_RESPONSE=0 FORCE_BAREMETAL=0 KEEP=0
+YES=0 WITH_RESPONSE=0 WITH_OVERRIDE=0 FORCE_BAREMETAL=0 KEEP=0
 
 for a in "$@"; do case "$a" in
   -y|--yes)            YES=1 ;;
   --with-response)     WITH_RESPONSE=1 ;;
+  --with-override)     WITH_OVERRIDE=1 ;;
   --force-baremetal)   FORCE_BAREMETAL=1 ;;
   --keep)              KEEP=1 ;;
-  -h|--help)           sed -n '2,27p' "$0"; exit 0 ;;
+  -h|--help)           sed -n '2,30p' "$0"; exit 0 ;;
   *) echo "unknown arg: $a (see --help)"; exit 2 ;;
 esac; done
 
@@ -59,6 +68,7 @@ cleanup(){
   printf '\n%s=== cleanup ===%s\n' "$c_y" "$c_0"
   [ -n "${VICTIM_PID:-}" ] && kill -9 "$VICTIM_PID" 2>/dev/null
   for pid in "${BG_PIDS[@]:-}"; do [ -n "$pid" ] && kill "$pid" 2>/dev/null; done
+  tetra tracingpolicy delete dsuite-enforce-override 2>/dev/null && info "removed enforce-override policy"
   tetra tracingpolicy delete dsuite-enforce 2>/dev/null && info "removed enforce policy"
   tetra tracingpolicy delete dsuite-observe 2>/dev/null && info "removed observe policy"
   nft delete table inet dsuite_isolate 2>/dev/null
@@ -85,6 +95,12 @@ wait_for_finding(){ # $1=check substring  $2=timeout secs
   done
   return 1
 }
+# prog_count: number of currently-resident eBPF programs, per bpftool. Used to
+# prove the synthetic implant program is ABSENT after enforcement — we compare a
+# baseline taken before arming against the count after the SIGKILL/Override
+# attempt. `bpftool prog list` prints one "<id>: <type>" header line per program;
+# count those header lines (lines starting with a digit + colon).
+prog_count(){ bpftool prog list 2>/dev/null | grep -cE '^[0-9]+:'; }
 
 # ───────────────────────── stage 0 — guards ─────────────────────────
 say "stage 0 — guards & prerequisites"
@@ -109,6 +125,7 @@ if command -v systemd-detect-virt >/dev/null 2>&1; then
 fi
 need go "build agentd/collector"; need cc "compile the eBPF loader"; need tetra "Tetragon CLI"
 need curl "HTTP checks"; need systemctl "service checks"; need nft "isolate cleanup"
+need bpftool "prove the implant eBPF program is absent after enforcement"
 systemctl is-active --quiet tetragon || die "tetragon service is not active. Install + start Tetragon first (agent/deploy/ENFORCE.md step b), then re-run."
 [ -f "$TLOG" ] || die "Tetragon JSON export not found at $TLOG. Enable file export (set export-filename in /etc/tetragon/tetragon.conf.d/ and restart tetragon), or pass AGENT_TETRAGON_LOG=... — agentd consumes that export."
 info "tetragon active; JSON export at $TLOG"
@@ -172,6 +189,13 @@ fi
 say "stage 3 — enforcement: the non-allow-listed loader must be SIGKILLed"
 tetra tracingpolicy delete dsuite-observe 2>/dev/null  # swap observe → enforce (avoid double-hook)
 
+# Baseline the resident eBPF program count BEFORE arming. After the SIGKILL
+# attempt we re-count: if the count rose, the implant program loaded anyway
+# (SIGKILL reaped the loader asynchronously, AFTER the program was resident) —
+# the honest caveat from dsuite-enforce.yaml / ENFORCE.md part (d).
+PROG_BEFORE="$(prog_count)"
+info "resident eBPF programs before arming enforce: $PROG_BEFORE"
+
 ENFORCE_YAML="$WORK/dsuite-enforce.generated.yaml"
 {
   cat <<'HEAD'
@@ -207,12 +231,101 @@ fi
 
 info "running the non-allow-listed loader under ENFORCE — expect: Killed..."
 "$BIN/loadbpf" >"$WORK/loadbpf-enforce.out" 2>&1; rc=$?
+LOADER_KILLED=0
 if [ "$rc" -eq 137 ]; then
+  LOADER_KILLED=1
   pass "loader was SIGKILLed (exit 137) — enforcement blocks the non-allow-listed bpf load"
 elif grep -q "NOT killed" "$WORK/loadbpf-enforce.out" 2>/dev/null; then
   fail "loader printed success and was not killed (rc=$rc) — enforce did NOT fire"
 else
   fail "loader exit=$rc (expected 137=SIGKILL); inconclusive — see $WORK/loadbpf-enforce.out"
+fi
+
+# IMPLANT-ABSENT CHECK — prove SIGKILL actually stopped the load, not just the
+# loader. Re-count resident eBPF programs; allow the count a moment to settle
+# (the killed loader's fd is closed and the program freed asynchronously).
+sleep 1
+PROG_AFTER="$(prog_count)"
+info "resident eBPF programs after the SIGKILL attempt: $PROG_AFTER (baseline $PROG_BEFORE)"
+if [ "${PROG_AFTER:-0}" -le "${PROG_BEFORE:-0}" ]; then
+  pass "implant ABSENT — no extra eBPF program resident after SIGKILL (the load was actually stopped)"
+elif [ "$LOADER_KILLED" = 1 ]; then
+  # The honest, load-bearing caveat: the loader DIED (137) but a program is still
+  # resident — SIGKILL reaped the loader AFTER the program loaded. Report it as a
+  # WARN, not a hard pass, and point at the Override variant (the true block).
+  printf '  %s[WARN]%s SIGKILL killed the loader (exit 137) BUT an extra eBPF program is resident\n' "$c_y" "$c_0"
+  printf '         (%d → %d). This is the documented async caveat: SIGKILL reaps the loader\n' "$PROG_BEFORE" "$PROG_AFTER"
+  printf '         AFTER the program is already loaded — it is best-effort, NOT a guaranteed block.\n'
+  printf '         Recommend the Override variant (enforce/dsuite-enforce-override.yaml, -EPERM) on a\n'
+  printf '         kernel with CONFIG_BPF_KPROBE_OVERRIDE. Re-run with --with-override to verify it.\n'
+else
+  fail "an extra eBPF program is resident ($PROG_BEFORE → $PROG_AFTER) and the loader was NOT killed — enforce did not block the load"
+fi
+
+# ──────────────────── stage 3b — Override: a TRUE block (optional) ────────────────────
+# Gated on the kernel actually supporting CONFIG_BPF_KPROBE_OVERRIDE. We trust
+# the agent's own preflight check (kprobe-override row "ok") rather than re-parse
+# the kernel config here. Override returns -EPERM from the kprobe, so the bpf()
+# load FAILS (loadbpf exits 1 with "Operation not permitted") and NO program is
+# resident — unlike SIGKILL, the load never happens.
+if [ "$WITH_OVERRIDE" = 1 ]; then
+  say "stage 3b — Override: the non-allow-listed load must be BLOCKED (-EPERM), not just killed"
+  if "$BIN/agentd" preflight 2>/dev/null | grep -E '^ok[[:space:]]' | grep -q 'kprobe-override'; then
+    info "preflight reports CONFIG_BPF_KPROBE_OVERRIDE present — proceeding with the Override variant"
+    tetra tracingpolicy delete dsuite-enforce 2>/dev/null  # swap Sigkill → Override (avoid double-hook)
+
+    OVERRIDE_YAML="$WORK/dsuite-enforce-override.generated.yaml"
+    {
+      cat <<'HEAD'
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: dsuite-enforce-override
+spec:
+  kprobes:
+    - call: "security_bpf_prog_load"
+      syscall: false
+      selectors:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+HEAD
+      for p in "${ALLOW[@]}"; do printf '                - "%s"\n' "$p"; done
+      cat <<'TAIL'
+          matchActions:
+            - action: Override
+              argError: -1
+TAIL
+    } > "$OVERRIDE_YAML"
+
+    PROG_BEFORE_OV="$(prog_count)"
+    tetra tracingpolicy add "$OVERRIDE_YAML" || die "failed to load the override enforce policy"
+    info "override policy loaded (allow-list: ${ALLOW[*]}); resident progs before: $PROG_BEFORE_OV"
+    sleep 1
+
+    info "running the non-allow-listed loader under OVERRIDE — expect: BPF_PROG_LOAD fails (EPERM), exit 1..."
+    "$BIN/loadbpf" >"$WORK/loadbpf-override.out" 2>&1; orc=$?
+    if [ "$orc" -eq 1 ] && grep -qiE 'Operation not permitted|EPERM' "$WORK/loadbpf-override.out"; then
+      pass "load was BLOCKED at the source (bpf() returned EPERM, exit 1) — Override is a true block"
+    elif grep -q "NOT killed" "$WORK/loadbpf-override.out" 2>/dev/null; then
+      fail "loader reported success — Override did NOT block (kernel may lack CONFIG_BPF_KPROBE_OVERRIDE despite preflight)"
+    else
+      fail "loader exit=$orc (expected 1=EPERM); see $WORK/loadbpf-override.out"
+    fi
+
+    sleep 1
+    PROG_AFTER_OV="$(prog_count)"
+    info "resident eBPF programs after the Override attempt: $PROG_AFTER_OV (baseline $PROG_BEFORE_OV)"
+    if [ "${PROG_AFTER_OV:-0}" -le "${PROG_BEFORE_OV:-0}" ]; then
+      pass "implant ABSENT — Override prevented the load entirely (no extra program resident)"
+    else
+      fail "an extra eBPF program is resident ($PROG_BEFORE_OV → $PROG_AFTER_OV) — Override did not block the load"
+    fi
+    tetra tracingpolicy delete dsuite-enforce-override 2>/dev/null && info "removed override policy"
+  else
+    printf '  %s[SKIP]%s --with-override requested but preflight does not report CONFIG_BPF_KPROBE_OVERRIDE\n' "$c_y" "$c_0"
+    info "this kernel cannot do the Override block; the Sigkill variant (stage 3) is the fallback. Skipping 3b."
+  fi
 fi
 
 # ──────────────────── stage 4 — manual response (optional, LIVE) ────────────────────

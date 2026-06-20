@@ -18,13 +18,32 @@
 # block), exactly as the design's "Prevention policies" table specifies — those
 # get an `Override` block only in a later phase, after they've been corroborated.
 #
-# WHY SIGKILL (and not Override)
-# ------------------------------
+# WHY SIGKILL (and not Override) — AND ITS LOAD-BEARING CAVEAT
+# -----------------------------------------------------------
 # `Sigkill` sends SIGKILL to the offending process. It is broadly available and
 # does NOT require a kernel built with CONFIG_BPF_KPROBE_OVERRIDE. `Override`
 # (injecting a return value to make the bpf() call itself fail) WOULD need that
-# kernel option — which is why M4 uses Sigkill. `agentd preflight` reports
+# kernel option — which is why M4 defaults to Sigkill. `agentd preflight` reports
 # CONFIG_BPF_KPROBE_OVERRIDE as advisory/medium for exactly this reason.
+#
+#   >>> HONEST CAVEAT — Sigkill is BEST-EFFORT, not a guaranteed block. <<<
+# SIGKILL reaps the LOADER PROCESS *asynchronously* from the kprobe: the signal
+# is delivered AFTER the kprobe returns, so the eBPF program may ALREADY BE
+# RESIDENT in the kernel by the time the signal lands. In other words, Sigkill
+# does NOT guarantee the program failed to load — it kills the loader, but a
+# fast/already-completed load can still leave the implant's program in place.
+#
+#   Sigkill  = "kill the loader, BEST-EFFORT"  (high-availability, no kernel option)
+#   Override = "ACTUALLY block the call (-EPERM) so the load never happens"
+#              (a TRUE block — but REQUIRES CONFIG_BPF_KPROBE_OVERRIDE)
+#
+# Where the kernel has CONFIG_BPF_KPROBE_OVERRIDE (confirm: `agentd preflight`
+# kprobe-override row OK, or `tetra probe`), prefer the STRONGER variant
+# `dsuite-enforce-override.yaml`, which genuinely prevents the load. Use THIS
+# Sigkill policy as the high-availability fallback where Override is unavailable.
+# The validation harness (validation/validate.sh stage 3) checks `bpftool prog
+# list` before/after the SIGKILL and reports HONESTLY if the loader died but the
+# program loaded anyway — exactly this caveat.
 #
 # THE ALLOW-LIST IS LOAD-BEARING — EDIT IT BEFORE ARMING
 # ------------------------------------------------------

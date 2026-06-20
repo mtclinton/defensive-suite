@@ -1,0 +1,129 @@
+[Unit]
+# =============================================================================
+# defensive-suite agentd — ARMED manual-response daemon (M3), LEAST-PRIVILEGE.
+#
+#   >>> SHIPPED, NOT INSTALLED/STARTED. REVIEW EVERY LINE. VM-FIRST. <<<
+#   The build and tests never install or start this. It runs the PRIVILEGED,
+#   weaponizable response primitive (kill / isolate / quarantine / revoke-key /
+#   block-hash). See deploy/RESPONSE.md before enabling — and validate in a VM.
+#
+# WHY THIS UNIT EXISTS
+# --------------------
+# RESPONSE.md previously told operators to `sudo agentd run --enable-response` as
+# FULL ROOT with no sandbox — the crown-jewel daemon shed every protection
+# exactly when it became weaponizable. This unit instead grants ONLY the few
+# capabilities the actuators actually need, keeps the rest of agentd.service's
+# sandbox, and adds the response brakes (kill-switch + rate limit). It mirrors
+# the well-sandboxed observe unit (agentd.service) and deviates only where an
+# actuator genuinely requires it (each deviation is justified below).
+# =============================================================================
+Description=defensive-suite agentd — ARMED manual response (least-privilege)
+Documentation=https://github.com/mtclinton/defensive-suite
+Documentation=file:///usr/local/share/defensive-suite/deploy/RESPONSE.md
+After=tetragon.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# AGENT_RESPONSE_TOKEN (required), AGENT_ENABLE_RESPONSE=1, AGENT_MGMT_IFACES,
+# AGENT_QUARANTINE_DIR, AGENT_RESPONSE_KILLSWITCH, AGENT_RESPONSE_RATE, and the
+# M1 collector settings live here (0600). The token is env-only so it never
+# appears in the process table. See deploy/agentd-response.env.example.
+EnvironmentFile=/etc/agentd/agentd.env
+# Serve the response socket in RuntimeDirectory and ARM live actions. The socket
+# path is under /run/agentd (RuntimeDirectory below). Review before enabling.
+ExecStart=/usr/local/bin/agentd run --response-socket /run/agentd/agentd.sock --enable-response
+Restart=on-failure
+RestartSec=3
+Nice=10
+
+# --- CAPABILITIES: exactly what the actuators need, NOT full root -------------
+# Each cap is mapped to the actuator that requires it. agentd does NOT run as a
+# bag of root powers; it holds these five-and-a-bit caps and nothing else.
+#   CAP_KILL            → `kill`: syscall.Kill(SIGKILL) a process we don't own.
+#   CAP_NET_ADMIN       → `isolate`: nft add table/chain/rule (egress drop).
+#   CAP_LINUX_IMMUTABLE → `quarantine`: chattr +i on the quarantined file.
+#   CAP_DAC_OVERRIDE    → `revoke-key` (write root/other-owned authorized_keys),
+#                          `block-hash` (write /etc/fapolicyd/rules.d), and
+#                          `quarantine` (rename/chmod files we don't own).
+#   CAP_FOWNER          → `quarantine`/`revoke-key`: chmod/chattr files whose
+#                          owner isn't us (FOWNER bypasses the owner-match check).
+#   CAP_DAC_READ_SEARCH → read the root-owned Tetragon JSON export (observe
+#                          pipeline still runs) without needing full DAC_OVERRIDE
+#                          for reads.
+# AmbientCapabilities makes these available to the process AND to children it
+# execs (nft / chattr / fapolicyd-cli), which is required because the actuators
+# shell out — with NoNewPrivileges=true the children inherit the ambient set.
+CapabilityBoundingSet=CAP_KILL CAP_NET_ADMIN CAP_LINUX_IMMUTABLE CAP_DAC_OVERRIDE CAP_FOWNER CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_KILL CAP_NET_ADMIN CAP_LINUX_IMMUTABLE CAP_DAC_OVERRIDE CAP_FOWNER CAP_DAC_READ_SEARCH
+
+# NoNewPrivileges: no setuid/escalation. Children (nft/chattr/fapolicyd-cli) keep
+# working because the AMBIENT caps are inherited across exec — they don't need to
+# gain new privileges, they carry the ones we already hold.
+NoNewPrivileges=true
+
+# --- FILESYSTEM: strict, with ReadWritePaths for exactly what we write --------
+# ProtectSystem=strict makes the whole FS read-only except ReadWritePaths.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agentd /etc/fapolicyd /run/agentd
+#   /var/lib/agentd  → state, response-audit.jsonl, the quarantine dir.
+#   /etc/fapolicyd   → `block-hash` writes a deny rule under rules.d/.
+#   /run/agentd      → the response socket + the kill-switch file (tmpfs).
+ReadOnlyPaths=/var/log/tetragon
+
+# DEVIATION FROM agentd.service: ProtectHome=FALSE (the observe unit sets it
+# true). `revoke-key` must edit /root/.ssh/authorized_keys and /home/*/.ssh/...,
+# which ProtectHome=true would hide. TRADE-OFF: agentd can read/write home dirs
+# — accepted ONLY because revoke-key needs it; if you do NOT use revoke-key,
+# consider ProtectHome=read-only or true and dropping CAP_DAC_OVERRIDE.
+ProtectHome=false
+
+# Per-service /tmp.
+PrivateTmp=true
+
+# The kernel-protection sandbox is kept from agentd.service (none of these block
+# an actuator: kill/nft/chattr/fapolicyd-cli touch processes, netfilter, file
+# attrs and files — not kernel tunables, modules, logs, cgroups, or the clock).
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+
+# MemoryDenyWriteExecute is KEPT (agentd is a static Go binary; no actuator JITs
+# or maps W+X memory). nft/chattr/fapolicyd-cli are ordinary binaries too. If a
+# future actuator needs W+X, justify removing it here — not silently.
+MemoryDenyWriteExecute=true
+
+# DEVIATION FROM agentd.service: add AF_NETLINK. `isolate` shells out to nft,
+# which talks to the kernel netfilter subsystem over an AF_NETLINK socket; the
+# observe unit's AF_INET/AF_INET6/AF_UNIX-only set would break it. AF_UNIX is the
+# response socket; AF_INET/AF_INET6 are the collector POST.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+SystemCallArchitectures=native
+# DEVIATION FROM agentd.service: @system-service is kept, but @privileged is NOT
+# filtered out here — `kill` (and the netlink/chattr ioctls) need privileged
+# syscalls that the observe unit deliberately denied. @resources/@mount/@swap
+# stay denied (no actuator needs them).
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @mount @swap
+
+# Modest limits — response is low-rate by design (and rate-limited in-process).
+MemoryMax=256M
+TasksMax=64
+UMask=0077
+
+# RuntimeDirectory creates /run/agentd (0700, root) for the socket + kill-switch,
+# cleaned up on stop. The default kill-switch path /run/agentd/response.disabled
+# lives here: `touch /run/agentd/response.disabled` instantly disarms ALL
+# response without restarting the daemon (and `rm` re-arms it).
+RuntimeDirectory=agentd
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

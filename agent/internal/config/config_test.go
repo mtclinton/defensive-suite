@@ -124,6 +124,69 @@ func TestEnableResponseTruthiness(t *testing.T) {
 	}
 }
 
+func TestResponseBrakeDefaults(t *testing.T) {
+	d := Defaults()
+	if d.ResponseKillSwitch == "" {
+		t.Error("ResponseKillSwitch should have a non-empty default (the brake is on by default)")
+	}
+	if d.ResponseRateMax <= 0 {
+		t.Errorf("ResponseRateMax should default to a positive cap, got %d", d.ResponseRateMax)
+	}
+	if d.ResponseRateWindow <= 0 {
+		t.Errorf("ResponseRateWindow should default positive, got %v", d.ResponseRateWindow)
+	}
+}
+
+func TestLoadResponseBrakeEnv(t *testing.T) {
+	env := map[string]string{
+		"AGENT_RESPONSE_KILLSWITCH": "/tmp/disarm",
+		"AGENT_RESPONSE_RATE":       "5/30s",
+	}
+	c := Load(func(k string) string { return env[k] })
+	if c.ResponseKillSwitch != "/tmp/disarm" {
+		t.Errorf("kill-switch path=%q", c.ResponseKillSwitch)
+	}
+	if c.ResponseRateMax != 5 || c.ResponseRateWindow != 30*time.Second {
+		t.Errorf("rate=%d per %v (want 5 per 30s)", c.ResponseRateMax, c.ResponseRateWindow)
+	}
+}
+
+func TestParseRateForms(t *testing.T) {
+	def := Defaults()
+	cases := []struct {
+		in        string
+		wantMax   int
+		wantWin   time.Duration
+		wantOK    bool // whether the value should be applied (false ⇒ keep defaults)
+		wantUnset bool // value absent ⇒ keep defaults
+	}{
+		{in: "10/60s", wantMax: 10, wantWin: 60 * time.Second, wantOK: true},
+		{in: "3", wantMax: 3, wantWin: def.ResponseRateWindow, wantOK: true}, // count only, keep default window
+		{in: "0", wantMax: 0, wantWin: def.ResponseRateWindow, wantOK: true}, // 0 disables the limit
+		{in: "7 per 5m", wantMax: 7, wantWin: 5 * time.Minute, wantOK: true},
+		{in: "garbage", wantUnset: true}, // unparseable ⇒ keep defaults (don't silently unbound)
+		{in: "5/notaduration", wantUnset: true},
+		{in: "-1/60s", wantUnset: true},
+	}
+	for _, c := range cases {
+		cfg := Load(func(k string) string {
+			if k == "AGENT_RESPONSE_RATE" {
+				return c.in
+			}
+			return ""
+		})
+		if c.wantUnset {
+			if cfg.ResponseRateMax != def.ResponseRateMax || cfg.ResponseRateWindow != def.ResponseRateWindow {
+				t.Errorf("%q should keep defaults, got %d per %v", c.in, cfg.ResponseRateMax, cfg.ResponseRateWindow)
+			}
+			continue
+		}
+		if cfg.ResponseRateMax != c.wantMax || cfg.ResponseRateWindow != c.wantWin {
+			t.Errorf("%q → %d per %v, want %d per %v", c.in, cfg.ResponseRateMax, cfg.ResponseRateWindow, c.wantMax, c.wantWin)
+		}
+	}
+}
+
 func TestMgmtIfacesAlwaysKeepsLoopback(t *testing.T) {
 	c := Load(func(k string) string {
 		if k == "AGENT_MGMT_IFACES" {

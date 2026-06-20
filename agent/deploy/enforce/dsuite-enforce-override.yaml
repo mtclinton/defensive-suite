@@ -1,0 +1,126 @@
+# =============================================================================
+# defensive-suite — Tetragon TracingPolicy (M4, ENFORCE mode — OVERRIDE variant)
+#
+#   >>> SHIPPED, NOT APPLIED. REVIEW EVERY LINE. VALIDATE IN A VM FIRST. <<<
+#   The build and tests NEVER load this. Loading it ARMS BLOCKING on the host.
+#   See deploy/ENFORCE.md for the full, human-run arming runbook + rollback.
+# =============================================================================
+#
+# WHAT THIS POLICY DOES — AND HOW IT DIFFERS FROM dsuite-enforce.yaml
+# ------------------------------------------------------------------
+# This is the STRONGER sibling of dsuite-enforce.yaml. Same hook
+# (security_bpf_prog_load), same `matchBinaries NotIn` allow-list — but instead
+# of `Sigkill` it uses `Override` to inject an error return (-EPERM) into the
+# kprobed function. That makes the kernel's bpf() program-load FAIL.
+#
+#   dsuite-enforce.yaml            (Sigkill):  "kill the loader, BEST-EFFORT."
+#   dsuite-enforce-override.yaml   (Override): "ACTUALLY BLOCK the call (-EPERM)."
+#
+# WHY THIS IS A TRUE BLOCK (and Sigkill is only honest-but-incomplete)
+# -------------------------------------------------------------------
+# Sigkill reaps the LOADER PROCESS *asynchronously* from the kprobe. SIGKILL is
+# delivered after the kprobe returns, so the eBPF program may ALREADY BE RESIDENT
+# in the kernel by the time the signal lands — you killed the messenger, but the
+# implant's program can be loaded. Sigkill is high-availability (no kernel option
+# needed) and a good default, but it does NOT guarantee the load failed.
+#
+# Override returns -EPERM (argError: -1) FROM the kprobe, so the bpf() syscall
+# itself returns an error and the program is NEVER loaded. This is the genuine
+# prevention: the implant's load attempt fails at the source.
+#
+# >>> HARD REQUIREMENT: CONFIG_BPF_KPROBE_OVERRIDE <<<
+# -----------------------------------------------------
+# `Override` ONLY works on a kernel built with CONFIG_BPF_KPROBE_OVERRIDE=y. On a
+# kernel WITHOUT it, loading this policy will fail to attach the override (or be
+# a no-op). CONFIRM SUPPORT FIRST — do not assume:
+#
+#     agentd preflight          # the "kprobe-override" row must be OK / =y
+#     tetra probe               # Tetragon's own capability probe
+#     # or directly:
+#     grep CONFIG_BPF_KPROBE_OVERRIDE /boot/config-$(uname -r)
+#     zcat /proc/config.gz | grep CONFIG_BPF_KPROBE_OVERRIDE
+#
+# If the option is ABSENT, DO NOT use this file — fall back to dsuite-enforce.yaml
+# (Sigkill), which works on any kernel and is the documented high-availability
+# default. Use THIS (Override) variant ONLY where the kernel supports it and you
+# want a guaranteed block rather than a best-effort kill.
+#
+# THE ALLOW-LIST IS LOAD-BEARING — EDIT IT BEFORE ARMING
+# ------------------------------------------------------
+# `matchBinaries` with operator "NotIn" means: the action fires for any binary
+# whose path is NOT in `values`. So `values` MUST list every legitimate eBPF
+# loader on YOUR host, or you will -EPERM Cilium/Tetragon/your own tracer the
+# instant they load a program — and with Override that load FAILS (it doesn't
+# just kill them, it breaks their datapath). Confirm the real paths first:
+#
+#     command -v cilium-agent tetragon bpfsentry
+#     readlink -f $(command -v cilium-agent)   # resolve symlinks to the real ELF
+#
+# Tetragon matches the executable's resolved path. When in doubt, run OBSERVE
+# (dsuite-observe.yaml) first and watch which loaders appear before arming.
+#
+# ARMING DISCIPLINE (non-negotiable)
+# ----------------------------------
+#   1. Run `agentd preflight` — confirm BTF + Tetragon active AND kprobe-override.
+#   2. Load OBSERVE first; watch findings; confirm your loaders are allow-listed.
+#   3. Flip ONE policy to enforce at a time. Use EITHER this file OR
+#      dsuite-enforce.yaml — never both (they double-hook the same call).
+#   4. Test the BLOCK in a VM: a non-allowlisted bpf() load should return EPERM
+#      (the loader exits non-zero with "operation not permitted"), and NO new
+#      program should be resident afterwards.
+#   5. Rollback is one command: `sudo tetra tracingpolicy delete dsuite-enforce-override`.
+#
+# Install (privileged — REVIEW, do not auto-run):
+#     sudo tetra tracingpolicy add dsuite-enforce-override.yaml
+# Confirm it loaded:
+#     sudo tetra tracingpolicy list
+# Remove (rollback):
+#     sudo tetra tracingpolicy delete dsuite-enforce-override
+# -----------------------------------------------------------------------------
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: dsuite-enforce-override
+spec:
+  kprobes:
+    # -------------------------------------------------------------------------
+    # eBPF-rootkit load — ENFORCE via OVERRIDE (-EPERM: a TRUE block).
+    #
+    # security_bpf_prog_load is reached when a process loads an eBPF program.
+    # The selector fires only when the LOADING BINARY is NOT one of the
+    # allow-listed legitimate loaders. The action injects argError -1 (-EPERM)
+    # so the bpf() program-load FAILS — the program is never resident.
+    #
+    # matchBinaries + operator "NotIn":
+    #   fire for any executable whose path is NOT in `values`.
+    # matchActions + action "Override", argError: -1:
+    #   make the kprobed function return -EPERM. REQUIRES CONFIG_BPF_KPROBE_OVERRIDE.
+    #   (-1 == -EPERM == "Operation not permitted". Use a different negative errno
+    #    only if you have a specific reason; -EPERM is the natural "denied" code.)
+    # -------------------------------------------------------------------------
+    - call: "security_bpf_prog_load"
+      syscall: false
+      selectors:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                # ---- ALLOW-LIST: your legitimate eBPF loaders. EDIT FOR YOUR HOST. ----
+                # Cilium's agent (loads its own datapath/Tetragon programs):
+                - "/usr/bin/cilium-agent"
+                - "/usr/local/bin/cilium-agent"
+                # Tetragon itself (it loads eBPF to observe/enforce):
+                - "/usr/bin/tetragon"
+                - "/usr/local/bin/tetragon"
+                # The defensive-suite's own eBPF tracer / bpfsentry loader:
+                - "/usr/local/bin/bpfsentry"
+                # (Add: bpftool, systemd, your distro's BPF-LSM loader, etc., as
+                #  observed in OBSERVE mode. An incomplete list -EPERMs a legit
+                #  loader and BREAKS it — start in observe and confirm before arming.)
+                # ----------------------------------------------------------------------
+          matchActions:
+            # Override the return value with -EPERM (-1): the bpf() load FAILS and
+            # no program is loaded. This is the genuine block (vs. Sigkill's
+            # best-effort kill). REQUIRES CONFIG_BPF_KPROBE_OVERRIDE — confirm with
+            # `agentd preflight` / `tetra probe` BEFORE arming.
+            - action: Override
+              argError: -1

@@ -63,6 +63,22 @@ type Config struct {
 	QuarantineDir string
 	// ResponseMaxBody bounds a /respond request body.
 	ResponseMaxBody int64
+
+	// --- M3 response BRAKES (on the weaponizable primitive) ---
+
+	// ResponseKillSwitch is a file path that, when it EXISTS, globally disarms ALL
+	// response actions (live and dry-run alike) without restarting agentd. An
+	// operator `touch`es it to instantly disable response. Default
+	// /run/agentd/response.disabled. The Responder checks it right after guard
+	// validation, on every request.
+	ResponseKillSwitch string
+	// ResponseRateMax caps how many LIVE response executions may run within
+	// ResponseRateWindow (sliding window). Beyond the cap, requests are refused and
+	// audited so a hijacked response surface cannot become a rapid mass-kill /
+	// mass-isolate DoS. Dry-run is free (never counted). 0 disables the limit.
+	ResponseRateMax int
+	// ResponseRateWindow is the sliding window over which ResponseRateMax applies.
+	ResponseRateWindow time.Duration
 }
 
 // Defaults returns a safe baseline for a single Linux workstation.
@@ -127,6 +143,14 @@ func Defaults() Config {
 		MgmtIfaces:      []string{"lo"},
 		QuarantineDir:   "/var/lib/agentd/quarantine",
 		ResponseMaxBody: 64 << 10,
+
+		// Response brakes. The kill-switch defaults under /run/agentd so it lives on
+		// tmpfs (clears on reboot, fast to touch) alongside the socket. The rate
+		// limit defaults to 10 live actions per 60s — generous for a human operator,
+		// but a hard cap on a runaway/hijacked mass-action.
+		ResponseKillSwitch: "/run/agentd/response.disabled",
+		ResponseRateMax:    10,
+		ResponseRateWindow: 60 * time.Second,
 	}
 }
 
@@ -173,7 +197,52 @@ func Load(getenv func(string) string) Config {
 	if v := getenv("AGENT_QUARANTINE_DIR"); v != "" {
 		c.QuarantineDir = v
 	}
+	// --- M3 response brakes ---
+	if v := getenv("AGENT_RESPONSE_KILLSWITCH"); v != "" {
+		c.ResponseKillSwitch = v
+	}
+	if v := getenv("AGENT_RESPONSE_RATE"); v != "" {
+		// Form: "N/Ws" (e.g. "10/60s") or just "N" (window keeps its default).
+		if max, win, ok := parseRate(v, c.ResponseRateWindow); ok {
+			c.ResponseRateMax, c.ResponseRateWindow = max, win
+		}
+	}
 	return c
+}
+
+// parseRate parses an AGENT_RESPONSE_RATE value. Accepted forms:
+//
+//	"10"        → 10 per the default window
+//	"10/60s"    → 10 per 60s (any time.ParseDuration window)
+//	"10 per 5m" → 10 per 5m
+//
+// A value of "0" disables the limit. Returns ok=false (and the caller keeps its
+// defaults) if the count is unparseable, so a typo can't silently remove the
+// brake by setting an unbounded rate.
+func parseRate(v string, defWindow time.Duration) (max int, window time.Duration, ok bool) {
+	v = strings.TrimSpace(v)
+	window = defWindow
+	// Split on '/' or the word "per".
+	var countStr, winStr string
+	if i := strings.IndexByte(v, '/'); i >= 0 {
+		countStr, winStr = v[:i], v[i+1:]
+	} else if i := strings.Index(v, " per "); i >= 0 {
+		countStr, winStr = v[:i], v[i+5:]
+	} else {
+		countStr = v
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(countStr))
+	if err != nil || n < 0 {
+		return 0, defWindow, false
+	}
+	if winStr = strings.TrimSpace(winStr); winStr != "" {
+		w, werr := time.ParseDuration(winStr)
+		if werr != nil || w <= 0 {
+			return 0, defWindow, false
+		}
+		window = w
+	}
+	return n, window, true
 }
 
 // truthy parses a permissive boolean env value: 1/true/yes/on (any case) → true.

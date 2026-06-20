@@ -15,10 +15,12 @@ Artifacts referenced here (all shipped, none applied):
 | File | What it is | State |
 |------|------------|-------|
 | `tetragon/dsuite-observe.yaml` | observe-only policy (M1) | watch findings |
-| `enforce/dsuite-enforce.yaml` | the M4 enforce policy (SIGKILL non-allowlisted bpf loaders) | **arms blocking** |
+| `enforce/dsuite-enforce.yaml` | the M4 enforce policy — **SIGKILL** non-allowlisted bpf loaders (best-effort, no kernel option) | **arms blocking** |
+| `enforce/dsuite-enforce-override.yaml` | **stronger** variant — **Override (-EPERM)**, a TRUE block; **requires `CONFIG_BPF_KPROBE_OVERRIDE`** | **arms blocking** |
 | `enforce/sysctl/99-dsuite-hardening.conf` | kernel hardening drop-in | apply with `sysctl --system` |
 | `enforce/fapolicyd/README` | block-hash deny-rule path | hand-maintained |
 | `enforce/nftables/egress-baseline.nft` | optional logged-egress baseline | optional |
+| `systemd/agentd-response.service` | least-privilege unit for the **armed** response daemon (caps, not full root) | **shipped, not installed** |
 
 ---
 
@@ -117,6 +119,42 @@ sudo tetra tracingpolicy list                 # expect dsuite-enforce present
 agentd preflight                              # enforce-policy check now notes "may already be armed"
 ```
 
+#### SIGKILL is honest-but-incomplete — and the stronger `Override` variant
+
+`dsuite-enforce.yaml` uses **`Sigkill`**: it kills the *loader process*. But
+SIGKILL reaps that process **asynchronously from the kprobe** — the signal lands
+*after* the kprobe returns, so the eBPF program **may already be resident** by
+the time the loader dies. Sigkill is therefore **"kill the loader, best-effort"**
+— high-availability (no kernel option), a good default, but **not a guaranteed
+block**.
+
+For a **true block**, ship and arm **`enforce/dsuite-enforce-override.yaml`**
+instead: it uses **`Override` (`argError: -1` → `-EPERM`)** so the `bpf()` load
+*itself* fails and the program is **never loaded**. This is genuine prevention —
+but it **REQUIRES a kernel with `CONFIG_BPF_KPROBE_OVERRIDE`**:
+
+```sh
+# Confirm the kernel supports Override FIRST (preflight's kprobe-override row OK):
+agentd preflight | grep kprobe-override        # want: ok ... CONFIG_BPF_KPROBE_OVERRIDE=y
+tetra probe                                     # Tetragon's own capability probe
+# (or: grep CONFIG_BPF_KPROBE_OVERRIDE /boot/config-$(uname -r))
+
+# If supported, arm the OVERRIDE variant instead of the Sigkill one (never both —
+# they double-hook the same call). It returns -EPERM, so the load truly fails:
+sudo tetra tracingpolicy add enforce/dsuite-enforce-override.yaml
+sudo tetra tracingpolicy list                  # expect dsuite-enforce-override present
+```
+
+| Variant | Action | Guarantee | Kernel requirement |
+|---------|--------|-----------|--------------------|
+| `dsuite-enforce.yaml` | `Sigkill` | kill the loader, **best-effort** (program may already be resident) | none — works anywhere |
+| `dsuite-enforce-override.yaml` | `Override` (`-EPERM`) | **true block** — the load never happens | **`CONFIG_BPF_KPROBE_OVERRIDE`** |
+
+Where the kernel supports Override, prefer it. Where it doesn't, fall back to
+Sigkill and understand the caveat: the validation harness (stage 3) checks
+`bpftool prog list` before/after and reports honestly if SIGKILL killed the
+loader but the program loaded anyway.
+
 **Test the kill in the VM** (a non-allowlisted process loading an eBPF program
 should be SIGKILLed; an allow-listed loader should NOT be):
 
@@ -156,22 +194,33 @@ Enforcement (Tetragon SIGKILL) and manual response (agentd's kill/isolate/…) a
 independent. To also arm manual response (see [`RESPONSE.md`](RESPONSE.md)):
 
 ```sh
-# Token is env-only (never a flag → not in the process table):
-#   openssl rand -hex 32
-export AGENT_RESPONSE_TOKEN=<long-random>
+# Token is env-only (never a flag → not in the process table). Put it in the env
+# file the unit reads (/etc/agentd/agentd.env, 0600):
+#   openssl rand -hex 32   # → AGENT_RESPONSE_TOKEN=...  AGENT_ENABLE_RESPONSE=1
 
-# Dry-run first (default): the socket serves, NOTHING is executed.
-sudo AGENT_RESPONSE_TOKEN=$AGENT_RESPONSE_TOKEN agentd run --response-socket /run/agentd.sock
+# Arm response via the LEAST-PRIVILEGE unit — NOT interactive full root. The unit
+# grants only CAP_KILL/CAP_NET_ADMIN/CAP_LINUX_IMMUTABLE/CAP_DAC_OVERRIDE/
+# CAP_FOWNER/CAP_DAC_READ_SEARCH, keeps the observe sandbox, and wires the
+# kill-switch + rate-limit brakes. REVIEW the unit, then VM-first:
+sudo install -m 0644 systemd/agentd-response.service /etc/systemd/system/agentd-response.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentd-response       # arms response (VM-FIRST)
 
-# Go LIVE only after VM validation (requires root):
-sudo AGENT_RESPONSE_TOKEN=$AGENT_RESPONSE_TOKEN agentd run \
-  --response-socket /run/agentd.sock --enable-response
+# Instant disarm without a restart (the kill-switch brake):
+sudo touch /run/agentd/response.disabled          # refuse ALL response now
+sudo rm    /run/agentd/response.disabled          # re-arm
 
 # The collector needs the SAME token to proxy /api/respond (so the console can
 # request actions). In /etc/collector/collector.env (0600):
-#   COLLECTOR_AGENT_SOCKET=/run/agentd.sock
+#   COLLECTOR_AGENT_SOCKET=/run/agentd/agentd.sock
 #   COLLECTOR_RESPONSE_TOKEN=<same value as AGENT_RESPONSE_TOKEN>
 ```
+
+> There is no separate `agentd-enforce.service`: arming Tetragon enforcement is a
+> `tetra tracingpolicy add` step (steps c/d), and agentd's own role during
+> enforcement is the read-only observe pipeline already covered by the sandboxed
+> `agentd.service`. Only the *response* daemon needs privileges, so only it gets a
+> dedicated least-privilege unit (`agentd-response.service`).
 
 `agentd preflight`'s **response-readiness** check reports whether the token is set
 and whether `--enable-response` / `AGENT_ENABLE_RESPONSE` would flip it out of
@@ -182,9 +231,10 @@ dry-run — read-only, it enables nothing.
 ## (f) ROLLBACK — every step is reversible
 
 ```sh
-# Enforcement (the arming step) — remove the enforce policy:
-sudo tetra tracingpolicy delete dsuite-enforce
-#   → SIGKILL-on-bpf-load is disarmed. (Observe can stay loaded.)
+# Enforcement (the arming step) — remove whichever enforce policy you loaded:
+sudo tetra tracingpolicy delete dsuite-enforce            # the Sigkill variant
+sudo tetra tracingpolicy delete dsuite-enforce-override   # the Override variant
+#   → bpf-load enforcement is disarmed. (Observe can stay loaded.)
 sudo tetra tracingpolicy delete dsuite-observe   # if you also want observe off
 
 # Sysctl hardening:
@@ -209,8 +259,13 @@ sudo rm /etc/fapolicyd/rules.d/50-dsuite.rules && sudo fapolicyd-cli --update
   (bpf-load SIGKILL); the file-write and exec hooks stay observe-only in P1.
 - **Allow-list your loaders before arming**, or you SIGKILL Cilium/Tetragon/your
   tracer. Confirm them in observe mode first.
-- **SIGKILL needs no `CONFIG_BPF_KPROBE_OVERRIDE`**; that option is only for the
-  later `Override` blocking — which is why preflight rates it advisory/medium.
+- **SIGKILL is honest-but-incomplete.** It needs no `CONFIG_BPF_KPROBE_OVERRIDE`
+  and is the high-availability default, but it reaps the loader *asynchronously*
+  from the kprobe — the program may already be resident when the signal lands, so
+  it does **not** guarantee the load failed. Where the kernel has
+  `CONFIG_BPF_KPROBE_OVERRIDE`, prefer `dsuite-enforce-override.yaml`
+  (`Override`/`-EPERM`) for a **true block**; preflight's `kprobe-override` row
+  tells you whether it's available.
 - **VM-first, always.** Enforcement can brick a daily driver.
 - **bpfsentry stays the out-of-band trust backstop** — agentd is never the sole
   source of truth (a kernel implant can lie to the on-host agent).

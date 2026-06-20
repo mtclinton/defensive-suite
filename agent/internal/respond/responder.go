@@ -1,37 +1,132 @@
 package respond
 
-import "time"
+import (
+	"fmt"
+	"os"
+	"sync"
+	"time"
+)
 
 // Responder is the manual-response orchestrator. It is deliberately
 // dry-run-by-default: a zero-value-ish Responder built without flipping DryRun
 // off will never call the Executor. The agent's config (ResponseEnabled, default
 // false) is the only thing that sets DryRun=false.
 //
-// Respond's pipeline is: Validate (pure guards) → audit the intent → if DryRun,
-// return the planned Result WITHOUT calling Execute → else Execute → audit the
-// result.
+// Respond's pipeline is: Validate (pure guards) → KILL-SWITCH check → RATE-LIMIT
+// (live only) → audit the intent → if DryRun, return the planned Result WITHOUT
+// calling Execute → else Execute → audit the result.
+//
+// The two BRAKES (kill-switch + rate limit) sit on the weaponizable primitive:
+// even with response armed, an operator can instantly disarm everything by
+// touching the kill-switch file, and a hijacked surface cannot turn into a rapid
+// mass-action because the rate limit caps live executions per window.
 type Responder struct {
 	Exec   Executor
 	Audit  *AuditLog
 	DryRun bool
 	Guards Guards
 	now    func() time.Time
+
+	// KillSwitchPath, when non-empty and the file EXISTS, globally disarms ALL
+	// response (live and dry-run alike). Checked on every Respond.
+	KillSwitchPath string
+	// fileExists checks whether KillSwitchPath exists. Injectable for tests;
+	// defaults to an os.Stat-based check.
+	fileExists func(string) bool
+
+	// rate limits LIVE executions (nil = unlimited). Only the live path consumes
+	// from it; dry-run is free.
+	rate *rateLimiter
 }
 
 // NewResponder builds a Responder. DryRun defaults to TRUE here: the only way to
 // get a live responder is to pass dryRun=false explicitly (the agent does that
 // only when ResponseEnabled is set). A nil clock falls back to time.Now.
+//
+// The brakes are configured AFTER construction via WithKillSwitch / WithRateLimit
+// so existing callers/tests keep their two-gate behaviour unchanged.
 func NewResponder(exec Executor, audit *AuditLog, dryRun bool, guards Guards, now func() time.Time) *Responder {
 	if now == nil {
 		now = time.Now
 	}
 	return &Responder{
-		Exec:   exec,
-		Audit:  audit,
-		DryRun: dryRun,
-		Guards: guards,
-		now:    now,
+		Exec:       exec,
+		Audit:      audit,
+		DryRun:     dryRun,
+		Guards:     guards,
+		now:        now,
+		fileExists: statExists,
 	}
+}
+
+// WithKillSwitch arms the global kill-switch at path. While that file exists,
+// every Respond is refused (regardless of DryRun). An empty path disables the
+// check. exists is the existence probe; nil uses the default os.Stat-based one
+// (tests inject a deterministic func). Returns the Responder for chaining.
+func (r *Responder) WithKillSwitch(path string, exists func(string) bool) *Responder {
+	r.KillSwitchPath = path
+	if exists != nil {
+		r.fileExists = exists
+	} else if r.fileExists == nil {
+		r.fileExists = statExists
+	}
+	return r
+}
+
+// WithRateLimit caps LIVE executions to max per window (sliding window driven by
+// the Responder's injected clock). max<=0 or window<=0 disables the limit.
+// Dry-run is never counted. Returns the Responder for chaining.
+func (r *Responder) WithRateLimit(max int, window time.Duration) *Responder {
+	if max > 0 && window > 0 {
+		r.rate = &rateLimiter{max: max, window: window}
+	} else {
+		r.rate = nil
+	}
+	return r
+}
+
+// statExists is the default kill-switch probe: the file exists iff os.Stat
+// succeeds. A non-IsNotExist error (e.g. a permission problem reaching the path)
+// is treated as "exists" — failing SAFE: if we can't prove the kill-switch is
+// absent, we behave as though response is disabled.
+func statExists(path string) bool {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true
+	}
+	return !os.IsNotExist(err)
+}
+
+// rateLimiter is a sliding-window limiter over the Responder's injected clock. It
+// records the timestamps of recent live executions and refuses once max events
+// fall within the trailing window.
+type rateLimiter struct {
+	mu     sync.Mutex
+	max    int
+	window time.Duration
+	events []time.Time
+}
+
+// allow reports whether an execution at time now is within budget, recording it
+// when allowed. Timestamps older than the window are pruned first, so it is a
+// true sliding window. Not consuming on refusal means a blocked storm cannot
+// extend its own lockout.
+func (rl *rateLimiter) allow(now time.Time) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := now.Add(-rl.window)
+	kept := rl.events[:0]
+	for _, t := range rl.events {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	rl.events = kept
+	if len(rl.events) >= rl.max {
+		return false
+	}
+	rl.events = append(rl.events, now)
+	return true
 }
 
 // Respond validates, audits, and (unless dry-run) executes req. It never returns
@@ -55,10 +150,33 @@ func (r *Responder) Respond(req Request) Result {
 		return res
 	}
 
-	// 2. Audit the intent BEFORE doing anything.
+	// 2. KILL-SWITCH: a global, file-backed disarm. If the kill-switch file exists,
+	//    REFUSE the action regardless of DryRun — an operator can `touch` it to
+	//    instantly disable ALL response without restarting agentd. Checked on every
+	//    request, BEFORE the intent audit, so the refusal is what gets recorded and
+	//    the executor is never reached even when live.
+	if r.KillSwitchPath != "" && r.fileExists != nil && r.fileExists(r.KillSwitchPath) {
+		res := r.refuse(req, fmt.Sprintf("response globally disabled (kill-switch %s)", r.KillSwitchPath))
+		_ = r.Audit.Intent(now, req, r.DryRun)
+		_ = r.Audit.Result(now, req, res)
+		return res
+	}
+
+	// 3. RATE LIMIT: cap LIVE executions per window so a hijacked surface cannot
+	//    become a rapid mass-kill / mass-isolate DoS. Dry-run is FREE (never
+	//    counted) — only the live path consumes from the limiter. Refused requests
+	//    do not consume budget, so a blocked storm cannot extend its own lockout.
+	if !r.DryRun && r.rate != nil && !r.rate.allow(now) {
+		res := r.refuse(req, fmt.Sprintf("rate limit exceeded (%d per %s)", r.rate.max, r.rate.window))
+		_ = r.Audit.Intent(now, req, r.DryRun)
+		_ = r.Audit.Result(now, req, res)
+		return res
+	}
+
+	// 4. Audit the intent BEFORE doing anything.
 	_ = r.Audit.Intent(now, req, r.DryRun)
 
-	// 3. Dry-run: return the planned action and audit it. Execute is NOT called.
+	// 5. Dry-run: return the planned action and audit it. Execute is NOT called.
 	if r.DryRun {
 		res := Result{
 			OK:     true,
@@ -72,7 +190,7 @@ func (r *Responder) Respond(req Request) Result {
 		return res
 	}
 
-	// 4. Live path: execute and audit the real outcome.
+	// 6. Live path: execute and audit the real outcome.
 	res, err := r.Exec.Execute(req)
 	res.Action, res.Target, res.DryRun = req.Action, req.Target, false
 	if err != nil {
@@ -85,6 +203,18 @@ func (r *Responder) Respond(req Request) Result {
 	}
 	_ = r.Audit.Result(r.clock(), req, res)
 	return res
+}
+
+// refuse builds a not-OK Result for a brake (kill-switch / rate limit) refusal,
+// preserving the responder's DryRun flag so the audit reflects the live/dry mode.
+func (r *Responder) refuse(req Request, detail string) Result {
+	return Result{
+		OK:     false,
+		Action: req.Action,
+		Target: req.Target,
+		DryRun: r.DryRun,
+		Detail: detail,
+	}
 }
 
 func (r *Responder) clock() time.Time {

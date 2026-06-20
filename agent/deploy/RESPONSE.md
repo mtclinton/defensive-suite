@@ -42,21 +42,69 @@ sudo install -m 0600 deploy/agentd-response.env.example /etc/agentd/agentd.env
 sudoedit /etc/agentd/agentd.env
 ```
 
-## 2. Enable response — REVIEW; this arms privileged actions
+## 2. Enable response — via the LEAST-PRIVILEGE systemd unit (REVIEW; arms actions)
+
+> ⚠️ Do **not** run the armed daemon as interactive full root. The shipped
+> `systemd/agentd-response.service` runs it with **only the capabilities the
+> actuators need** (not full root), keeps the observe unit's sandbox, and wires
+> the **kill-switch + rate-limit brakes**. **Review the unit, then VM-first.**
 
 ```sh
-# Dry-run first (default): the socket serves, but NOTHING is executed.
-sudo AGENT_RESPONSE_TOKEN=… agentd run \
-  --response-socket /run/agentd.sock
+# Install the least-privilege unit (SHIPPED, not auto-installed). REVIEW it first.
+sudo install -m 0644 deploy/systemd/agentd-response.service \
+  /etc/systemd/system/agentd-response.service
+sudo systemctl daemon-reload
 
-# Go LIVE only after validating in a VM. Requires root (kill/nft/chattr/fapolicyd).
-sudo AGENT_RESPONSE_TOKEN=… agentd run \
-  --response-socket /run/agentd.sock \
-  --enable-response
+# Enable + start the ARMED, least-privilege response daemon (VM-FIRST):
+sudo systemctl enable --now agentd-response
+sudo systemctl status agentd-response          # confirm it came up
+journalctl -u agentd-response -f               # watch the audit/startup lines
 ```
 
-The socket is created `0600` (root-only). agentd refuses to serve it without
+The unit's `ExecStart` is `agentd run --response-socket /run/agentd/agentd.sock
+--enable-response`. The socket is created `0600` (root-only) under the unit's
+`RuntimeDirectory` (`/run/agentd`). agentd refuses to serve it without
 `AGENT_RESPONSE_TOKEN` set — a privileged socket with no auth must not start.
+
+### Capability → actuator mapping (why it is NOT full root)
+
+| Capability | Actuator(s) | Why |
+|------------|-------------|-----|
+| `CAP_KILL` | `kill` | `SIGKILL` a process we don't own |
+| `CAP_NET_ADMIN` | `isolate` | `nft` add table/chain/rule (egress drop) |
+| `CAP_LINUX_IMMUTABLE` | `quarantine` | `chattr +i` the quarantined file |
+| `CAP_DAC_OVERRIDE` | `revoke-key`, `block-hash`, `quarantine` | write root/other-owned `authorized_keys`, write `/etc/fapolicyd`, rename/chmod files we don't own |
+| `CAP_FOWNER` | `quarantine`, `revoke-key` | chmod/chattr files whose owner isn't us |
+| `CAP_DAC_READ_SEARCH` | observe pipeline | read the root-owned Tetragon export |
+
+Notable sandbox trade-off: **`ProtectHome=false`** — `revoke-key` must edit
+`/root/.ssh` and `/home/*/.ssh`. If you don't use `revoke-key`, tighten
+`ProtectHome` and drop `CAP_DAC_OVERRIDE`. See the unit's inline comments for
+every deviation from the observe unit (`agentd.service`).
+
+### Two brakes on the weaponizable primitive (set in the unit / env)
+
+- **Kill-switch** (`AGENT_RESPONSE_KILLSWITCH`, default
+  `/run/agentd/response.disabled`): `touch` it to **instantly disarm ALL
+  response** — every request is refused (even live) and audited — **without
+  restarting** the daemon. `rm` it to re-arm.
+
+  ```sh
+  sudo touch /run/agentd/response.disabled   # disarm now (no restart)
+  sudo rm    /run/agentd/response.disabled   # re-arm
+  ```
+
+- **Rate limit** (`AGENT_RESPONSE_RATE`, default `10/60s`): caps **live**
+  executions per window (dry-run is free). A hijacked response surface cannot
+  become a rapid mass-kill / mass-isolate DoS — the (N+1)th action in the window
+  is refused and audited.
+
+### Dry-run preview (optional, no destructive action)
+
+To preview without arming, run the unit's command **without** `--enable-response`
+(or set `AGENT_ENABLE_RESPONSE=0` in the env file): the socket serves, the brakes
+apply, and the responder returns *what it WOULD do*, audited, but the executor is
+never called.
 
 ## 3. Point the collector at the socket (so the console can request actions)
 
@@ -79,9 +127,9 @@ the token is empty — the collector never proxies privileged actions by acciden
 - `chattr` present — for `quarantine` (`+i` immutable; reversible).
 - `fapolicyd` + `fapolicyd-cli` present — for `block-hash` (deny rule by
   SHA-256; reversible: remove the rule file + `fapolicyd-cli --update`).
-- agentd running as root with the right `CapabilityBoundingSet` for the actions
-  you actually enable. `kill` is irreversible by nature; the rest return an
-  `undo` string.
+- agentd running under `agentd-response.service` with the least-privilege
+  `CapabilityBoundingSet` above (NOT full root) for the actions you actually
+  enable. `kill` is irreversible by nature; the rest return an `undo` string.
 
 ## Reversibility summary (returned in each `Result.Undo`)
 
