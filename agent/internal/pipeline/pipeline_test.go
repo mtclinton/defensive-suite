@@ -160,8 +160,15 @@ func TestTailDetectsInodeRotation(t *testing.T) {
 	go func() { _ = Tail(ctx, p, 10*time.Millisecond, func(l string) { got <- l }) }()
 	time.Sleep(120 * time.Millisecond) // let Tail capture initial offset+inode
 
-	// Rotate: remove and recreate with MORE bytes than the old file, so size > offset.
-	if err := os.Remove(p); err != nil {
+	// Rotate the way logrotate does: rename the old file aside (its inode stays
+	// allocated to the renamed file), then create a FRESH file at the path — which
+	// therefore gets a NEW inode, the signal Tail keys on. os.Remove+recreate
+	// instead would let the freed inode be REUSED on tmpfs/ext4, so the inode
+	// never changes and rotation is undetectable by stat alone; the realistic
+	// rename keeps this deterministic across filesystems. The new file is larger
+	// than the old offset, so the size-shrink check alone would NOT catch it —
+	// only the inode change does.
+	if err := os.Rename(p, p+".1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(p, []byte("rotated line A\nrotated line B\n"), 0o644); err != nil {

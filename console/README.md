@@ -16,17 +16,18 @@ audits, and stays **dry-run unless explicitly enabled** (see
 
 ```
 console/
-├── dist/                 # the frontend = the dashboard (mirror of ../dashboard/index.html)
 └── src-tauri/
     ├── Cargo.toml        # tauri v2 + notification plugin + ureq (collector poll/respond)
-    ├── tauri.conf.json   # window, tray, CSP, frontendDist
+    ├── tauri.conf.json   # window, tray, CSP, frontendDist → ../../dashboard
     ├── capabilities/     # v2 permission model (core + notification)
     ├── icons/            # app/tray icon
     └── src/main.rs       # tray + native notifications + posture poller + respond command
 ```
 
-The response panel only appears in the desktop app (it needs Tauri IPC); the same
-`dist/index.html` in a plain browser shows no response controls. Set
+The frontend is the suite's [dashboard](../dashboard/) loaded **directly** via
+`frontendDist: "../../dashboard"` — no copy to keep in sync. The response panel
+only appears in the desktop app (it needs Tauri IPC); the same dashboard in a
+plain browser shows no response controls. Set
 `DSUITE_RESPONSE_TOKEN` (matching the collector's `COLLECTOR_RESPONSE_TOKEN`) in
 the console's environment to enable it; without it the panel reports "response is
 disabled".
@@ -55,8 +56,8 @@ collector (`http://127.0.0.1:8787` by default; override the poller with
 
 ## Notes
 
-- `dist/index.html` mirrors `../dashboard/index.html`; regenerate it with
-  `cp ../dashboard/index.html dist/index.html` when the dashboard changes.
+- The app embeds `../dashboard/index.html` directly (`frontendDist`), so there is
+  no generated `dist/` to keep in sync — edit the dashboard and rebuild.
 - The CSP allows the webview to reach only `'self'` and the local collector
   (`127.0.0.1:8787` / `localhost:8787`) — nothing else.
 - On macOS/Windows the same project builds against WKWebView / WebView2; the

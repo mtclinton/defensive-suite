@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "club.cybercrime.dsuite.console",
   "build": {
-    "frontendDist": "../dist"
+    "frontendDist": "../../dashboard"
   },
   "app": {
     "withGlobalTauri": true,
