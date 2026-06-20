@@ -55,14 +55,24 @@ fn main() {
         .expect("error while running the defensive-suite console");
 }
 
-/// Polls the collector's summary and fires a native notification when the worst
-/// severity transitions into high/critical.
+/// Lower rank = more severe; anything below high is a no-alert sentinel.
+fn severity_rank(s: &str) -> u8 {
+    match s {
+        "critical" => 0,
+        "high" => 1,
+        _ => 9,
+    }
+}
+
+/// Polls the collector's summary and fires a native notification only when the
+/// worst severity ESCALATES into high/critical (never on a de-escalation, e.g.
+/// critical→high, which is an improvement and must not look like a new threat).
 fn poll_loop(app: AppHandle) {
     let url = format!("{}/api/summary", collector_base());
     let mut last = String::new();
     loop {
         if let Some(worst) = fetch_worst(&url) {
-            if worst != last && (worst == "critical" || worst == "high") {
+            if severity_rank(&worst) <= 1 && severity_rank(&worst) < severity_rank(&last) {
                 let _ = app
                     .notification()
                     .builder()
