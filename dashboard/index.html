@@ -84,9 +84,12 @@
      detectors report without them, so this markup is purely additive. */
   .conf{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;
     padding:1px 7px;border-radius:999px;text-transform:uppercase;letter-spacing:.05em;margin-left:7px;vertical-align:middle}
-  .conf-high{color:var(--accent);background:rgba(51,214,192,.12);border:1px solid rgba(51,214,192,.35)}
-  .conf-medium{color:var(--med);background:rgba(245,196,81,.1);border:1px solid rgba(245,196,81,.28)}
-  .conf-low{color:var(--faint);background:rgba(125,135,148,.08);border:1px solid var(--line2)}
+  /* confidence uses its OWN hue family (teal→periwinkle→grey), deliberately NOT
+     the severity palette (red/orange/yellow/blue), so a ⬡ confidence badge is
+     never confused with a severity pill. */
+  .conf-high{color:var(--accent);background:rgba(51,214,192,.16);border:1px solid rgba(51,214,192,.42)}
+  .conf-medium{color:var(--accent2);background:rgba(124,156,255,.1);border:1px solid rgba(124,156,255,.32)}
+  .conf-low{color:var(--faint);background:rgba(125,135,148,.07);border:1px solid var(--line2)}
   .lineage{margin-top:6px;display:flex;flex-direction:column;gap:2px}
   .lineage .rl{font-family:var(--mono);font-size:11px;color:var(--muted)}
   .lineage .rl::before{content:"↳ ";color:var(--faint)}
@@ -222,6 +225,7 @@ const TOOLS = [
   {id:"egresswatch", job:"Egress visibility + magic-packet backdoor detection",                                   stack:"Go + eBPF (cilium/ebpf)"},
   {id:"posturescan", job:"Kernel & container hardening posture (sysctls, caps, rootless Podman)",                 stack:"Go/Python + Lynis/OpenSCAP"},
   {id:"bpfsentry",   job:"Offline eBPF-program enumerator + out-of-band memory forensics",                        stack:"Go (cilium/ebpf) + Python (Volatility 3)"},
+  {id:"agent",       job:"Real-time tier (agentd): tails Tetragon, stateful exec→egress correlation + lineage",   stack:"Go + Tetragon/eBPF"},
 ];
 
 /* ---- threat model (from docs/THREAT_MODEL.md) ---- */
@@ -271,9 +275,9 @@ const SAMPLE = [
      Base real-time findings carry a confidence; the correlator pairs a suspicious
      exec with a later egress from the SAME process (by exec_id) and escalates the
      pair into ONE Critical "connected out" C2 finding, with the process lineage. */
-  {tool:"agent", check:"realtime.correlated", severity:"critical", title:"suspicious process then connected out", detail:"/tmp/.cache/.x (execution from a staging directory) connected to 23.254.164.123:4444", path:"/tmp/.cache/.x", technique:"T1071", confidence:"high", related:["base: execution from a staging directory","base technique=T1059","dst=23.254.164.123:4444","lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]","ancestor previously flagged suspicious"]},
-  {tool:"agent", check:"realtime.exec", severity:"high", title:"execution from a staging directory", detail:"/tmp/.cache/.x spawned under a world-writable path", path:"/tmp/.cache/.x", technique:"T1059", confidence:"medium", related:["lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]"]},
-  {tool:"agent", check:"realtime.bpf", severity:"high", title:"non-allowlisted eBPF program load", detail:"loader /tmp/.cache/.x is not in the BPF loader allowlist", path:"/tmp/.cache/.x", technique:"T1014", confidence:"medium"},
+  {tool:"agent", check:"realtime.correlated", severity:"critical", title:"suspicious process then connected out", detail:"/tmp/.cache/.x (execution from a staging directory) connected to 23.254.164.123:4444", path:"/tmp/.cache/.x", technique:"T1071", confidence:"high", related:["base: execution from a staging directory","base technique=T1059","dst=23.254.164.123:4444","lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]"]},
+  {tool:"agent", check:"realtime.exec", severity:"medium", title:"execution from a staging directory", detail:"/tmp/.cache/.x spawned under a world-writable path", path:"/tmp/.cache/.x", technique:"T1059", confidence:"low", related:["lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]"]},
+  {tool:"agent", check:"realtime.bpf", severity:"high", title:"eBPF program loaded by an unrecognized loader", detail:"fn=security_bpf_prog_load loader=/tmp/.cache/.x pid=1337", path:"/tmp/.cache/.x", technique:"T1014", confidence:"medium"},
 ];
 
 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
@@ -294,7 +298,7 @@ function humanAge(sec){
 /* ---------- rendering ---------- */
 const $ = s => document.querySelector(s);
 const el = (t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;};
-function sevPill(s){return `<span class="pill sev-${s}"><span class="d"></span>${s}</span>`;}
+function sevPill(s){const e=esc(s);return `<span class="pill sev-${e}"><span class="d"></span>${e}</span>`;}
 
 function renderKpis(){
   const by={critical:0,high:0,medium:0,low:0,info:0};
@@ -313,9 +317,9 @@ function renderKpis(){
 
 function populateFilters(){
   const tools=[...new Set(DATA.map(f=>f.tool))].sort();
-  $("#fTool").innerHTML = `<option value="">All tools</option>`+tools.map(t=>`<option>${t}</option>`).join("");
+  $("#fTool").innerHTML = `<option value="">All tools</option>`+tools.map(t=>`<option>${esc(t)}</option>`).join("");
   const tech=[...new Set(DATA.map(f=>f.technique).filter(Boolean))].sort();
-  $("#fTech").innerHTML = `<option value="">All techniques</option>`+tech.map(t=>`<option>${t}</option>`).join("");
+  $("#fTech").innerHTML = `<option value="">All techniques</option>`+tech.map(t=>`<option>${esc(t)}</option>`).join("");
 }
 
 function renderRows(){
