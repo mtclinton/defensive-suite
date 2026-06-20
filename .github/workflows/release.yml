@@ -1,0 +1,208 @@
+name: release
+
+# Tag-triggered release: build static Linux amd64 + arm64 binaries for all 8 Go
+# modules, build the Tauri console AppImage (amd64 only), assemble per-arch
+# tarballs with SHA256SUMS, and publish a GitHub Release.
+#
+# workflow_dispatch runs the SAME builds as a DRY-RUN: it uploads the artifacts
+# via actions/upload-artifact and publishes NO release — so the pipeline can be
+# verified end-to-end without cutting a release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # needed by `gh release create` on the tag path
+
+env:
+  # On a tag push, GITHUB_REF_NAME is the tag (e.g. v1.2.3). On workflow_dispatch
+  # it is the branch name; we still inject it as the version for the dry-run.
+  VERSION: ${{ github.ref_name }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Per-arch static Go binaries (amd64 + arm64). Pure-Go, stdlib-only, so
+  #    cross-compiling arm64 needs NO C cross-toolchain — just GOARCH=arm64.
+  # ---------------------------------------------------------------------------
+  binaries:
+    name: go binaries · ${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+
+      - name: Build all 8 modules (static, version-injected)
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p out/bin
+          ldflags="-s -w -X main.version=${VERSION}"
+          # module:binary:build_pkg  (bpfsentry builds from ./cmd/bpfsentry,
+          # agent's binary is agentd; the rest build their root package).
+          mods="
+            authwatch:authwatch:.
+            credsentinel:credsentinel:.
+            instguard:instguard:.
+            posturescan:posturescan:.
+            egresswatch:egresswatch:.
+            bpfsentry:bpfsentry:./cmd/bpfsentry
+            collector:collector:.
+            agent:agentd:.
+          "
+          for spec in $mods; do
+            mod="${spec%%:*}"; rest="${spec#*:}"; bin="${rest%%:*}"; pkg="${rest#*:}"
+            echo ">> $mod -> $bin ($GOOS/$GOARCH)"
+            ( cd "$mod" && go build -trimpath -ldflags "$ldflags" \
+                -o "${GITHUB_WORKSPACE}/out/bin/$bin" "$pkg" )
+          done
+          echo "--- built binaries ---"
+          ls -l out/bin
+          # Prove the version was injected (binaries are this runner's arch on
+          # amd64; on arm64 they won't run here, so only smoke-test the native one).
+          if [ "$GOARCH" = "amd64" ]; then
+            ./out/bin/collector version
+          fi
+
+      - name: Upload binaries for the assemble job
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.goarch }}
+          path: out/bin/*
+          retention-days: 1
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 2. Tauri console AppImage (amd64 only — Tauri bundles the host arch and the
+  #    runner is amd64). WebKitGTK deps + tauri-cli, then `cargo tauri build`.
+  # ---------------------------------------------------------------------------
+  appimage:
+    name: tauri console AppImage · amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: WebKitGTK + GTK dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev build-essential file
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: console/src-tauri
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --locked
+
+      - name: Build the AppImage
+        working-directory: console
+        run: cargo tauri build --bundles appimage
+
+      - name: Collect the AppImage
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # Tauri writes the bundle under src-tauri/target/release/bundle/appimage/.
+          found="$(find console/src-tauri/target -path '*bundle/appimage/*.AppImage' -print -quit || true)"
+          if [ -z "$found" ]; then
+            echo "::error::no AppImage produced"; find console/src-tauri/target -name '*.AppImage' || true; exit 1
+          fi
+          cp "$found" "out/defensive-suite-console-${VERSION}-amd64.AppImage"
+          ls -l out
+
+      - name: Upload the AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage-amd64
+          path: out/*.AppImage
+          retention-days: 1
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 3. Assemble per-arch tarballs (binaries + deploy/ trees + install.sh +
+  #    dashboard + READMEs) with SHA256SUMS, and either publish a Release
+  #    (tag push) or upload the artifacts as a dry-run (workflow_dispatch).
+  # ---------------------------------------------------------------------------
+  assemble:
+    name: assemble + release
+    needs: [binaries, appimage]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dl
+
+      - name: Assemble per-arch tarballs + SHA256SUMS
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          modules="authwatch credsentinel instguard posturescan egresswatch bpfsentry collector agent"
+          for arch in amd64 arm64; do
+            stage="defensive-suite-${VERSION}-linux-${arch}"
+            rm -rf "$stage"; mkdir -p "$stage/bin"
+            # Binaries
+            cp dl/binaries-${arch}/* "$stage/bin/"
+            chmod +x "$stage/bin/"*
+            # Each module's deploy/ tree (systemd units, config examples, sigma…)
+            for m in $modules; do
+              if [ -d "$m/deploy" ]; then
+                mkdir -p "$stage/$m"
+                cp -R "$m/deploy" "$stage/$m/"
+              fi
+            done
+            # Installer + dashboard + top-level docs
+            cp install.sh "$stage/"
+            chmod +x "$stage/install.sh"
+            cp -R dashboard "$stage/"
+            cp README.md "$stage/" 2>/dev/null || true
+            [ -d docs ] && cp -R docs "$stage/" || true
+            # Tar it up
+            tar -czf "dist/${stage}.tar.gz" "$stage"
+            rm -rf "$stage"
+          done
+          # Include the amd64 AppImage as a top-level release asset.
+          cp dl/appimage-amd64/*.AppImage dist/ 2>/dev/null || true
+          # One SHA256SUMS over everything in dist/.
+          ( cd dist && sha256sum * > SHA256SUMS )
+          echo "--- release artifacts ---"
+          ls -l dist
+          cat dist/SHA256SUMS
+
+      # --- TAG PUSH: publish a GitHub Release with all artifacts ---------------
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*.tar.gz dist/*.AppImage dist/SHA256SUMS
+
+      # --- workflow_dispatch DRY-RUN: upload artifacts, publish NOTHING --------
+      - name: Upload release artifacts (dry-run, no Release published)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dryrun-${{ github.ref_name }}
+          path: dist/*
+          if-no-files-found: error
