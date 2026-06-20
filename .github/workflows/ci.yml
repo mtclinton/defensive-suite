@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    # Build, vet, gofmt-check and test every Go module on real Linux. The suite
+    # is stdlib-only (no go.sum), so this needs no network and is fully offline.
+    name: go · ${{ matrix.module }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - authwatch
+          - credsentinel
+          - instguard
+          - posturescan
+          - egresswatch
+          - bpfsentry
+          - collector
+          - agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: gofmt
+        working-directory: ${{ matrix.module }}
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needs to run on:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+      - name: go build
+        working-directory: ${{ matrix.module }}
+        run: go build ./...
+      - name: go test
+        working-directory: ${{ matrix.module }}
+        run: go test -count=1 ./...
+      - name: stdlib-only (no external deps)
+        working-directory: ${{ matrix.module }}
+        run: |
+          if [ -f go.sum ]; then
+            echo "::error::go.sum present — module pulled an external dep; the suite is meant to be stdlib-only"; exit 1
+          fi
+
+  tauri:
+    # The Tauri v2 desktop console targets Linux/WebKitGTK. This is the build that
+    # can only be cargo-checked on macOS — here it compiles for real against the
+    # native webview, proving the Linux target links.
+    name: tauri console · linux build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: WebKitGTK + GTK dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev build-essential
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: console/src-tauri
+      - name: cargo build (locked)
+        working-directory: console/src-tauri
+        run: cargo build --locked
