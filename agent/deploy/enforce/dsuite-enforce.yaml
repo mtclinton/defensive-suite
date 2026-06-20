@@ -116,6 +116,27 @@ spec:
             - action: Sigkill
 
     # -------------------------------------------------------------------------
+    # (1b) Outbound TCP connect — OBSERVE only (feeds the correlation layer).
+    #
+    # Mirrors dsuite-observe.yaml's egress hook so the enforce bundle is
+    # self-describing (load THIS policy INSTEAD of the observe one). This is the
+    # EGRESS signal agentd's correlator pairs by exec_id with a recent suspicious
+    # exec to raise a Critical "suspicious process then connected out" C2 finding.
+    #
+    # >>> OBSERVE ONLY — NO matchActions. Egress is NEVER enforced here. <<<
+    # Blocking outbound connections is explicitly out of scope (deferred Phase 4):
+    # a mis-scoped egress block would sever legitimate traffic (updates, DNS, the
+    # collector POST itself). Declaring arg 0 as "sock" exports the destination
+    # (daddr/dport) so the agent can correlate; the kernel hook only reports.
+    # -------------------------------------------------------------------------
+    - call: "tcp_connect"
+      syscall: false
+      args:
+        - index: 0
+          type: "sock"
+      # NO selectors/matchActions → OBSERVE only. Do NOT enforce on egress.
+
+    # -------------------------------------------------------------------------
     # (2) Trust-path file writes — OBSERVE only in Phase 1 (alert, do NOT block).
     #
     # Per the design's prevention table, ld.so.preload / pam.d / authorized_keys

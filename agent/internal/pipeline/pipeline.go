@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mtclinton/defensive-suite/agent/internal/config"
+	"github.com/mtclinton/defensive-suite/agent/internal/correlate"
 	"github.com/mtclinton/defensive-suite/agent/internal/report"
 	"github.com/mtclinton/defensive-suite/agent/internal/rules"
 	"github.com/mtclinton/defensive-suite/agent/internal/tetragon"
@@ -31,6 +32,9 @@ func ruleCfg(cfg config.Config) rules.Config {
 }
 
 // EvalLine parses one Tetragon JSON line and returns the findings it triggers.
+// It is STATELESS (no correlation) — kept for back-compat and tests. run/scan
+// modes drive a stateful Correlator (NewCorrelator + Correlator.Line) instead so
+// exec→egress and lineage correlation work across the event stream.
 func EvalLine(line string, cfg config.Config) []report.Finding {
 	e, ok := tetragon.ParseLine(line)
 	if !ok {
@@ -39,12 +43,58 @@ func EvalLine(line string, cfg config.Config) []report.Finding {
 	return rules.Eval(e, ruleCfg(cfg))
 }
 
-// ProcessReader evaluates an entire Tetragon JSON stream (scan / one-shot mode).
+// ProcessReader evaluates an entire Tetragon JSON stream STATELESSLY (no
+// correlation). Kept for back-compat/tests; scan mode uses CorrelateReader so a
+// suspicious exec and a later connect in the same file are correlated.
 func ProcessReader(r io.Reader, cfg config.Config) []report.Finding {
 	rc := ruleCfg(cfg)
 	var out []report.Finding
 	for _, e := range tetragon.ParseStream(r) {
 		out = append(out, rules.Eval(e, rc)...)
+	}
+	return out
+}
+
+// Correlator is the pipeline's stateful evaluation point: it wraps the
+// correlate.Correlator with the agent config so callers drive findings through
+// ONE instance across the whole event stream (run mode) or file (scan mode).
+type Correlator struct {
+	c   *correlate.Correlator
+	cfg rules.Config
+}
+
+// NewCorrelator builds a stateful Correlator from the agent config, bounded by
+// the correlate package defaults (cap ~4096 exec_ids, TTL ~10min). The clock is
+// real; tests of the correlator itself inject a clock via correlate.New.
+func NewCorrelator(cfg config.Config) *Correlator {
+	return &Correlator{c: correlate.New(0, 0, nil), cfg: ruleCfg(cfg)}
+}
+
+// Line parses one Tetragon JSON line and runs it through the stateful correlator,
+// returning the base findings PLUS any correlated findings. A malformed/unknown
+// line yields nil. This is the per-line entry point run mode uses in place of the
+// stateless EvalLine.
+func (cw *Correlator) Line(line string) []report.Finding {
+	e, ok := tetragon.ParseLine(line)
+	if !ok {
+		return nil
+	}
+	return cw.c.Process(e, cw.cfg)
+}
+
+// Tracked reports how many processes the underlying correlator currently holds
+// (for observability/tests).
+func (cw *Correlator) Tracked() int { return cw.c.Tracked() }
+
+// CorrelateReader evaluates an entire Tetragon JSON stream through ONE stateful
+// correlator (scan / one-shot mode), so an exec flagged suspicious earlier in
+// the file and a later connect from the same process are correlated into a
+// single high-fidelity finding, in addition to the base findings.
+func CorrelateReader(r io.Reader, cfg config.Config) []report.Finding {
+	cw := NewCorrelator(cfg)
+	var out []report.Finding
+	for _, e := range tetragon.ParseStream(r) {
+		out = append(out, cw.c.Process(e, cw.cfg)...)
 	}
 	return out
 }

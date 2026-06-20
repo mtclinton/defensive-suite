@@ -1,10 +1,43 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 )
+
+// The correlation-layer fields (confidence, related) agentd emits must decode
+// into store.Finding and survive the on-disk snapshot round trip, so the
+// dashboard sees a correlated finding's confidence and lineage.
+func TestFindingCorrelationFieldsRoundTrip(t *testing.T) {
+	// Decode from the exact JSON shape agentd's report package marshals.
+	const agentJSON = `{"check":"realtime.correlated","severity":"critical","title":"suspicious process then connected out","technique":"T1071","confidence":"high","related":["base: execution from a staging directory","dst=1.2.3.4:443"]}`
+	var fd Finding
+	if err := json.Unmarshal([]byte(agentJSON), &fd); err != nil {
+		t.Fatalf("decode agent finding: %v", err)
+	}
+	if fd.Confidence != "high" || len(fd.Related) != 2 {
+		t.Fatalf("decoded finding lost correlation fields: %+v", fd)
+	}
+
+	dir := t.TempDir()
+	s, _ := New(dir, 0, 0)
+	s.AddReport(Report{Tool: "agent", Host: "h", Time: time.Now(), Findings: []Finding{fd}})
+
+	// Reopen from disk: the snapshot must preserve confidence + related.
+	s2, _ := New(dir, 0, 0)
+	got := s2.LatestFindings(Filter{})
+	if len(got) != 1 {
+		t.Fatalf("want 1 finding after reload, got %d", len(got))
+	}
+	if got[0].Confidence != "high" {
+		t.Errorf("confidence lost across snapshot: %+v", got[0])
+	}
+	if len(got[0].Related) != 2 || got[0].Related[0] != "base: execution from a staging directory" {
+		t.Errorf("related lost across snapshot: %+v", got[0].Related)
+	}
+}
 
 func TestLatestPerToolHost(t *testing.T) {
 	s, _ := New(t.TempDir(), 0, 0)

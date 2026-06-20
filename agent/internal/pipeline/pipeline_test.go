@@ -32,6 +32,70 @@ func TestProcessReader(t *testing.T) {
 	}
 }
 
+// CorrelateReader drives the stream through ONE stateful correlator: a
+// suspicious staging exec (exec_id X) followed by a connect (exec_id X) yields
+// the base findings PLUS a single Critical realtime.correlated finding — the
+// end-to-end exec→egress correlation the run/scan path relies on.
+func TestCorrelateReaderExecThenConnect(t *testing.T) {
+	const s = `{"process_exec":{"process":{"exec_id":"X","pid":1337,"binary":"/tmp/.x/payload","flags":"execve"},"parent":{"binary":"/bin/bash"}}}
+{"process_kprobe":{"process":{"exec_id":"X","pid":1337,"binary":"/tmp/.x/payload"},"function_name":"tcp_connect","args":[{"sock_arg":{"daddr":"1.2.3.4","dport":443}}]}}`
+	f := CorrelateReader(strings.NewReader(s), config.Defaults())
+	var base, correlated int
+	for _, x := range f {
+		switch x.Check {
+		case "realtime.exec":
+			base++
+		case "realtime.correlated":
+			correlated++
+			if x.Severity != report.SeverityCritical || x.Confidence != "high" {
+				t.Errorf("correlated finding should be Critical/high: %+v", x)
+			}
+			if !strings.Contains(x.Detail, "1.2.3.4:443") {
+				t.Errorf("correlated detail should name the dst: %q", x.Detail)
+			}
+		}
+	}
+	if base != 1 || correlated != 1 {
+		t.Fatalf("want 1 base exec + 1 correlated finding, got base=%d correlated=%d: %+v", base, correlated, f)
+	}
+}
+
+// A connect with no prior suspicious exec must NOT produce a correlated finding
+// through the stateful reader (only the base findings, here none).
+func TestCorrelateReaderNoSpuriousCorrelation(t *testing.T) {
+	const s = `{"process_exec":{"process":{"exec_id":"Y","pid":5,"binary":"/usr/bin/curl"},"parent":{"binary":"/bin/bash"}}}
+{"process_kprobe":{"process":{"exec_id":"Y","pid":5,"binary":"/usr/bin/curl"},"function_name":"tcp_connect","args":[{"sock_arg":{"daddr":"1.1.1.1","dport":443}}]}}`
+	for _, f := range CorrelateReader(strings.NewReader(s), config.Defaults()) {
+		if f.Check == "realtime.correlated" {
+			t.Errorf("benign exec→connect must not correlate: %+v", f)
+		}
+	}
+}
+
+// The per-line Correlator (run mode's path) carries state across calls: feeding
+// the suspicious exec then the connect on separate Line calls correlates, while
+// a malformed line is nil.
+func TestCorrelatorLineStateful(t *testing.T) {
+	cw := NewCorrelator(config.Defaults())
+	if got := cw.Line("garbage"); got != nil {
+		t.Errorf("garbage line should yield nil, got %+v", got)
+	}
+	_ = cw.Line(`{"process_exec":{"process":{"exec_id":"X","pid":9,"binary":"/dev/shm/x","flags":"execve"},"parent":{"binary":"/bin/bash"}}}`)
+	got := cw.Line(`{"process_kprobe":{"process":{"exec_id":"X","pid":9,"binary":"/dev/shm/x"},"function_name":"tcp_connect","args":[{"sock_arg":{"daddr":"2.3.4.5","dport":8080}}]}}`)
+	var correlated bool
+	for _, f := range got {
+		if f.Check == "realtime.correlated" {
+			correlated = true
+		}
+	}
+	if !correlated {
+		t.Errorf("stateful per-line correlator should correlate across calls: %+v", got)
+	}
+	if cw.Tracked() == 0 {
+		t.Error("correlator should be tracking process state")
+	}
+}
+
 func TestEvalLine(t *testing.T) {
 	f := EvalLine(`{"process_exec":{"process":{"binary":"/dev/shm/x"}}}`, config.Defaults())
 	if len(f) != 1 || f[0].Severity != report.SeverityMedium {

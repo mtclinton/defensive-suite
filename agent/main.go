@@ -114,7 +114,10 @@ func cmdScan(args []string) int {
 		r = f
 	}
 
-	findings := pipeline.ProcessReader(r, cfg)
+	// Drive the stream through ONE stateful correlator so a suspicious exec and a
+	// later connect in the same file are correlated end-to-end (not two unlinked
+	// low-value events). Base findings still emit; correlation adds.
+	findings := pipeline.CorrelateReader(r, cfg)
 	rep := report.New("agent", cfg.Host, "", time.Now(), findings)
 
 	if !*noPost && cfg.CollectorURL != "" {
@@ -208,6 +211,12 @@ func cmdRun(args []string) int {
 	}
 
 	buf := pipeline.NewBuffer(cfg.BufferMax)
+	// ONE stateful correlator drives the whole event stream so correlation works
+	// end-to-end: state (keyed by exec_id, bounded ~4096 procs / ~10min TTL,
+	// evicted oldest/expired) accumulates across lines and survives for the life
+	// of `run`. TailWithState invokes the per-line callback synchronously from a
+	// single goroutine, so the (non-concurrent) correlator needs no locking.
+	corr := pipeline.NewCorrelator(cfg)
 	// The HTTP client timeout (15s) is deliberately BELOW the collector's 20s
 	// WriteTimeout so a slow-but-alive collector isn't misread as a failed POST
 	// (which would needlessly spool a report that actually got through).
@@ -321,7 +330,7 @@ func cmdRun(args []string) int {
 	fmt.Fprintf(os.Stderr, "agentd %s: tailing %s → %s (observe mode)\n",
 		version, cfg.TetragonLog, orNone(cfg.CollectorURL))
 	_ = pipeline.TailWithState(ctx, cfg.TetragonLog, statePath, time.Second, func(line string) {
-		buf.Add(pipeline.EvalLine(line, cfg)...)
+		buf.Add(corr.Line(line)...)
 	})
 	flush()
 	return 0

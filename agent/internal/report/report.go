@@ -78,14 +78,23 @@ func (s Severity) syslogPriority() int {
 }
 
 // Finding is a single observation from one check.
+//
+// Confidence (low|medium|high) and Related are the correlation layer's contract:
+// a stateless base finding may carry a low/medium Confidence, while the stateful
+// correlator emits high-confidence findings whose Related lines hold the
+// corroborating evidence / process lineage ("spawned by curl ← bash ← sshd").
+// Both are omitempty, so every existing finding and tool is byte-for-byte
+// unaffected when it sets neither.
 type Finding struct {
-	Check     string   `json:"check"`
-	Severity  Severity `json:"severity"`
-	Title     string   `json:"title"`
-	Detail    string   `json:"detail,omitempty"`
-	Path      string   `json:"path,omitempty"`
-	Technique string   `json:"technique,omitempty"` // MITRE ATT&CK ID
-	Sigma     string   `json:"sigma,omitempty"`     // matching shipped Sigma rule
+	Check      string   `json:"check"`
+	Severity   Severity `json:"severity"`
+	Title      string   `json:"title"`
+	Detail     string   `json:"detail,omitempty"`
+	Path       string   `json:"path,omitempty"`
+	Technique  string   `json:"technique,omitempty"`  // MITRE ATT&CK ID
+	Sigma      string   `json:"sigma,omitempty"`      // matching shipped Sigma rule
+	Confidence string   `json:"confidence,omitempty"` // low|medium|high
+	Related    []string `json:"related,omitempty"`    // corroborating evidence / lineage
 }
 
 // Report is the full output of one authwatch run.

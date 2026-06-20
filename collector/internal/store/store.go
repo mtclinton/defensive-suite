@@ -15,17 +15,23 @@ import (
 
 // Finding mirrors the shape every tool emits (see each tool's report package).
 // Tool/Host/Time are filled by the collector when flattening for the API.
+//
+// Confidence and Related mirror agentd's correlation-layer fields so they
+// survive the JSON round-trip to the dashboard. Both are omitempty, so findings
+// from tools that do not set them are unchanged.
 type Finding struct {
-	Check     string    `json:"check"`
-	Severity  string    `json:"severity"`
-	Title     string    `json:"title"`
-	Detail    string    `json:"detail,omitempty"`
-	Path      string    `json:"path,omitempty"`
-	Technique string    `json:"technique,omitempty"`
-	Sigma     string    `json:"sigma,omitempty"`
-	Tool      string    `json:"tool,omitempty"`
-	Host      string    `json:"host,omitempty"`
-	Time      time.Time `json:"time,omitempty"`
+	Check      string    `json:"check"`
+	Severity   string    `json:"severity"`
+	Title      string    `json:"title"`
+	Detail     string    `json:"detail,omitempty"`
+	Path       string    `json:"path,omitempty"`
+	Technique  string    `json:"technique,omitempty"`
+	Sigma      string    `json:"sigma,omitempty"`
+	Confidence string    `json:"confidence,omitempty"` // low|medium|high (correlation layer)
+	Related    []string  `json:"related,omitempty"`    // corroborating evidence / lineage
+	Tool       string    `json:"tool,omitempty"`
+	Host       string    `json:"host,omitempty"`
+	Time       time.Time `json:"time,omitempty"`
 }
 
 // Report is one tool run's output, as POSTed to /ingest.

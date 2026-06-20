@@ -24,6 +24,36 @@ spec:
       syscall: false
       # no selectors/actions → every load is reported (agentd allowlists loaders).
 
+    # -------------------------------------------------------------------------
+    # Outbound TCP connect — the EGRESS signal that feeds agentd's correlation
+    # layer. On its own a connect is low-value noise; agentd's stateful
+    # correlator PAIRS it (by exec_id) with a recent suspicious exec — a
+    # staging-dir / fileless exec or an unrecognized eBPF load by the SAME
+    # process — and escalates the pair to a Critical "suspicious process then
+    # connected out" C2 finding (T1071), with the process lineage attached.
+    #
+    # We hook `tcp_connect`, the standard Tetragon egress function. It fires once
+    # per outbound TCP connection attempt with the socket as its first argument.
+    # Declaring arg index 0 as type "sock" makes Tetragon EXPORT the socket — the
+    # destination address/port land in the event's sock_arg (daddr / dport), which
+    # the parser normalizes into a "connect" Event's Dst / DstPort.
+    #
+    # OBSERVE ONLY — there are NO selectors and NO matchActions here, so EVERY
+    # outbound connection is merely reported, never blocked. Egress enforcement is
+    # explicitly out of scope (deferred): correlation runs in the agent on the
+    # reported stream; the kernel hook only observes.
+    #
+    # (If your kernel/Tetragon build prefers the LSM hook, `security_socket_connect`
+    #  is an equivalent egress function the parser also recognizes — but the sock
+    #  argument export differs by hook, so prefer tcp_connect where available.)
+    # -------------------------------------------------------------------------
+    - call: "tcp_connect"
+      syscall: false
+      args:
+        - index: 0
+          type: "sock"
+      # no selectors/matchActions → OBSERVE only (every egress connect reported).
+
     # Writes to trust-path files (ld.so.preload / PAM / authorized_keys / sshd_config).
     #
     # security_file_permission(file, mask) fires on read+write+exec. We declare

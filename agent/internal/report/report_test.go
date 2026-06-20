@@ -28,6 +28,43 @@ func TestSeverityJSONRoundTrip(t *testing.T) {
 	}
 }
 
+// The correlation-layer fields (Confidence, Related) must survive a JSON round
+// trip so a correlated finding's confidence and lineage reach the dashboard.
+func TestFindingConfidenceRelatedRoundTrip(t *testing.T) {
+	in := Finding{
+		Check: "realtime.correlated", Severity: SeverityCritical,
+		Title: "suspicious process then connected out", Technique: "T1071",
+		Confidence: "high",
+		Related:    []string{"base: execution from a staging directory", "dst=1.2.3.4:443"},
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out Finding
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Confidence != "high" {
+		t.Errorf("confidence=%q (want high)", out.Confidence)
+	}
+	if len(out.Related) != 2 || out.Related[1] != "dst=1.2.3.4:443" {
+		t.Errorf("related=%v", out.Related)
+	}
+}
+
+// A finding that sets neither field must emit no confidence/related keys, so
+// existing findings/tools are byte-for-byte unaffected (omitempty).
+func TestFindingOmitsEmptyCorrelationFields(t *testing.T) {
+	b, err := json.Marshal(Finding{Check: "c", Severity: SeverityInfo, Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(b); strings.Contains(s, "confidence") || strings.Contains(s, "related") {
+		t.Errorf("empty correlation fields must be omitted: %s", s)
+	}
+}
+
 func TestSeverityUnmarshalUnknown(t *testing.T) {
 	var s Severity
 	if err := json.Unmarshal([]byte(`"bogus"`), &s); err == nil {
