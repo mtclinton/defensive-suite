@@ -120,15 +120,33 @@ jobs:
           # Secrets → env. Absent on forks / dry-run → empty string → unsigned path.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo ">> signing key present → building with createUpdaterArtifacts (produces .AppImage.sig)"
-            cargo tauri build --bundles appimage \
-              --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          # The bundled app version MUST equal the release tag — otherwise the updater
+          # forever compares latest.json (the tag) against tauri.conf's hard-coded
+          # version and re-notifies on every launch, even after installing. On a TAG
+          # push, derive bare SemVer from the tag (strip leading "v") and inject it via
+          # --config; FAIL fast if the tag is not strict SemVer (an unparseable
+          # manifest version would silently disable updates). On the workflow_dispatch
+          # dry-run the ref is a BRANCH, not a release, so use a dev version + no guard
+          # (keeps the dry-run green; dispatch never publishes a release).
+          if [ "$EVENT_NAME" = "push" ]; then
+            appver="${VERSION#v}"
+            if ! printf '%s' "$appver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?(\+[0-9A-Za-z.]+)?$'; then
+              echo "::error::release tag '${VERSION}' is not strict SemVer (need MAJOR.MINOR.PATCH); the updater manifest would be unparseable"; exit 1
+            fi
           else
-            echo ">> no signing key → unsigned AppImage only (no updater artifacts)"
-            cargo tauri build --bundles appimage
+            appver="0.0.0-dev"
+          fi
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo ">> signing key present → building v${appver} with createUpdaterArtifacts (produces .AppImage.sig)"
+            cargo tauri build --bundles appimage \
+              --config "{\"version\":\"${appver}\",\"bundle\":{\"createUpdaterArtifacts\":true}}"
+          else
+            echo ">> no signing key → unsigned AppImage v${appver} only (no updater artifacts)"
+            cargo tauri build --bundles appimage \
+              --config "{\"version\":\"${appver}\"}"
           fi
 
       - name: Collect the AppImage (+ updater .sig when signed)
@@ -239,9 +257,12 @@ jobs:
           pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           download_url="https://github.com/mtclinton/defensive-suite/releases/download/${VERSION}/${appimage_name}"
           # Tauri's static-manifest schema: {version, notes, pub_date, platforms{...}}.
-          # version is the tag (e.g. v1.2.3 — must match the bundled app version).
+          # version is BARE SemVer (strip the leading "v") so it equals the bundled
+          # app version the build injected — the updater compares them as SemVer, so a
+          # mismatch (or a v-prefix) would re-notify forever. The asset filename/url
+          # keep the literal tag.
           jq -n \
-            --arg version "${VERSION}" \
+            --arg version "${VERSION#v}" \
             --arg notes "defensive-suite console ${VERSION}" \
             --arg pub_date "${pub_date}" \
             --arg signature "${signature}" \
