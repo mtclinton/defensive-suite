@@ -1,5 +1,7 @@
 # defensive-suite
 
+[![CI](https://github.com/mtclinton/defensive-suite/actions/workflows/ci.yml/badge.svg)](https://github.com/mtclinton/defensive-suite/actions/workflows/ci.yml)
+
 A personal defensive security suite for a Linux developer workstation, targeting the
 specific threat cluster that endangers a machine like this one: a poisoned dependency
 that executes at install time, harvests the credential files that gate build pipelines,
