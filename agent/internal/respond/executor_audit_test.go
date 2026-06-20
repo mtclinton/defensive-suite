@@ -3,11 +3,34 @@ package respond
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// copyThenRemove backs quarantine's cross-filesystem (EXDEV) move: copy contents
+// to dst, then remove src. RealExecutor.quarantine is never run in tests, but this
+// pure file-move helper is — it must actually relocate the file.
+func TestCopyThenRemove(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+	if err := os.WriteFile(src, []byte("malware"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyThenRemove(src, dst); err != nil {
+		t.Fatalf("copyThenRemove: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Error("source must be removed after the move")
+	}
+	if b, err := os.ReadFile(dst); err != nil || string(b) != "malware" {
+		t.Errorf("dst contents = %q, %v (want malware)", b, err)
+	}
+}
 
 func TestFakeExecutorRecordsAndIsInert(t *testing.T) {
 	f := &FakeExecutor{}

@@ -48,38 +48,49 @@ Nice=10
 #                          `quarantine` (rename/chmod files we don't own).
 #   CAP_FOWNER          → `quarantine`/`revoke-key`: chmod/chattr files whose
 #                          owner isn't us (FOWNER bypasses the owner-match check).
-#   CAP_DAC_READ_SEARCH → read the root-owned Tetragon JSON export (observe
-#                          pipeline still runs) without needing full DAC_OVERRIDE
-#                          for reads.
+# (Reading the root-owned Tetragon export needs no extra cap: CAP_DAC_OVERRIDE
+#  already bypasses read/search DAC checks, so CAP_DAC_READ_SEARCH is redundant.)
 # AmbientCapabilities makes these available to the process AND to children it
 # execs (nft / chattr / fapolicyd-cli), which is required because the actuators
 # shell out — with NoNewPrivileges=true the children inherit the ambient set.
-CapabilityBoundingSet=CAP_KILL CAP_NET_ADMIN CAP_LINUX_IMMUTABLE CAP_DAC_OVERRIDE CAP_FOWNER CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_KILL CAP_NET_ADMIN CAP_LINUX_IMMUTABLE CAP_DAC_OVERRIDE CAP_FOWNER CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_KILL CAP_NET_ADMIN CAP_LINUX_IMMUTABLE CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=CAP_KILL CAP_NET_ADMIN CAP_LINUX_IMMUTABLE CAP_DAC_OVERRIDE CAP_FOWNER
 
 # NoNewPrivileges: no setuid/escalation. Children (nft/chattr/fapolicyd-cli) keep
 # working because the AMBIENT caps are inherited across exec — they don't need to
 # gain new privileges, they carry the ones we already hold.
 NoNewPrivileges=true
 
-# --- FILESYSTEM: strict, with ReadWritePaths for exactly what we write --------
-# ProtectSystem=strict makes the whole FS read-only except ReadWritePaths.
-ProtectSystem=strict
-ReadWritePaths=/var/lib/agentd /etc/fapolicyd /run/agentd
-#   /var/lib/agentd  → state, response-audit.jsonl, the quarantine dir.
-#   /etc/fapolicyd   → `block-hash` writes a deny rule under rules.d/.
-#   /run/agentd      → the response socket + the kill-switch file (tmpfs).
+# --- FILESYSTEM ---------------------------------------------------------------
+# ProtectSystem=FULL (not strict): /usr, /boot and /etc are read-only, the rest of
+# the FS stays writable. This is deliberate — unlike the observe unit, a RESPONSE
+# daemon must act on ARBITRARY attacker-controlled paths: `quarantine` moves a
+# malicious file from anywhere (/home, /opt, /srv, /tmp, /var/...), and
+# `revoke-key` edits authorized_keys in /root or any /home/<user>. A `strict`
+# mount (whole FS read-only) with a fixed ReadWritePaths allow-list CANNOT
+# enumerate those targets, so the rename/write would fail with EROFS. `full` still
+# protects the immutable system trees while letting the actuators reach user space.
+ProtectSystem=full
+# /etc is read-only under `full`; carve out the one /etc path block-hash writes.
+# (/var/lib/agentd and /run/agentd are already writable under `full`; listed for
+# clarity. Write access comes from the MOUNT LEVEL / ReadWritePaths — NOT from
+# ProtectHome, which only un-masks dirs.)
+ReadWritePaths=/etc/fapolicyd /var/lib/agentd /run/agentd
 ReadOnlyPaths=/var/log/tetragon
 
-# DEVIATION FROM agentd.service: ProtectHome=FALSE (the observe unit sets it
-# true). `revoke-key` must edit /root/.ssh/authorized_keys and /home/*/.ssh/...,
-# which ProtectHome=true would hide. TRADE-OFF: agentd can read/write home dirs
-# — accepted ONLY because revoke-key needs it; if you do NOT use revoke-key,
-# consider ProtectHome=read-only or true and dropping CAP_DAC_OVERRIDE.
+# ProtectHome=FALSE (the observe unit sets it true). `revoke-key` must edit
+# /root/.ssh and /home/*/.ssh; ProtectHome=true would MASK those dirs entirely.
+# Un-masking is necessary but NOT sufficient — the write itself is permitted only
+# because ProtectSystem=full leaves /home and /root writable. If you use neither
+# revoke-key nor quarantine, set ProtectHome=true and tighten ProtectSystem.
 ProtectHome=false
 
-# Per-service /tmp.
-PrivateTmp=true
+# PrivateTmp is DROPPED (the observe unit can keep it). `quarantine` must move a
+# malicious file staged in the REAL /tmp or /var/tmp; a private per-service /tmp
+# would hide the host's /tmp, so the actuator would never find the target.
+# TRADE-OFF: the daemon shares the host /tmp (a tmp-race surface) — accepted
+# because quarantine needs it. (BindPaths=/tmp /var/tmp is an alternative.)
+PrivateTmp=false
 
 # The kernel-protection sandbox is kept from agentd.service (none of these block
 # an actuator: kill/nft/chattr/fapolicyd-cli touch processes, netfilter, file

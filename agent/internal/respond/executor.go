@@ -1,7 +1,9 @@
 package respond
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -189,7 +191,16 @@ func (e *RealExecutor) quarantine(req Request) (Result, error) {
 	}
 	dst := filepath.Join(dir, fmt.Sprintf("%d-%s", time.Now().UnixNano(), filepath.Base(src)))
 	if err := os.Rename(src, dst); err != nil {
-		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("quarantine move: %w", err)
+		// os.Rename fails with EXDEV across filesystems (e.g. a file staged in /tmp
+		// (tmpfs) and the quarantine dir on the root fs). Fall back to copy+remove
+		// so quarantine works across mounts; any other error is fatal.
+		if errors.Is(err, syscall.EXDEV) {
+			if cerr := copyThenRemove(src, dst); cerr != nil {
+				return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("quarantine copy: %w", cerr)
+			}
+		} else {
+			return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("quarantine move: %w", err)
+		}
 	}
 	// Make the quarantined copy immutable + unreadable. Best-effort: a failure to
 	// lock down does not undo the move.
@@ -283,4 +294,30 @@ var run = func(name string, args ...string) error {
 		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// copyThenRemove moves a file ACROSS filesystems (where os.Rename returns EXDEV):
+// copy contents to dst, then remove src. On a copy failure dst is cleaned up and
+// src is left intact. Used by quarantine when the target and the quarantine dir
+// are on different mounts (e.g. malware staged in /tmp (tmpfs) → /var/lib).
+func copyThenRemove(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		_ = in.Close()
+		return err
+	}
+	_, cerr := io.Copy(out, in)
+	_ = in.Close()
+	if closeErr := out.Close(); cerr == nil {
+		cerr = closeErr
+	}
+	if cerr != nil {
+		_ = os.Remove(dst)
+		return cerr
+	}
+	return os.Remove(src)
 }

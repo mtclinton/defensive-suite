@@ -193,9 +193,6 @@ tetra tracingpolicy delete dsuite-observe 2>/dev/null  # swap observe → enforc
 # attempt we re-count: if the count rose, the implant program loaded anyway
 # (SIGKILL reaped the loader asynchronously, AFTER the program was resident) —
 # the honest caveat from dsuite-enforce.yaml / ENFORCE.md part (d).
-PROG_BEFORE="$(prog_count)"
-info "resident eBPF programs before arming enforce: $PROG_BEFORE"
-
 ENFORCE_YAML="$WORK/dsuite-enforce.generated.yaml"
 {
   cat <<'HEAD'
@@ -228,6 +225,13 @@ if systemctl is-active --quiet tetragon; then
 else
   fail "tetragon went INACTIVE after enforce — the allow-list did not cover its real binary path"
 fi
+
+# Baseline the resident-program count AFTER the enforce policy (and Tetragon's own
+# enforce eBPF program) is loaded + settled, so ONLY the implant's load can change
+# it. Capturing before the policy loaded would count the policy's own program as a
+# false implant (false WARN).
+PROG_BEFORE="$(prog_count)"
+info "resident eBPF programs (enforce loaded, baseline): $PROG_BEFORE"
 
 info "running the non-allow-listed loader under ENFORCE — expect: Killed..."
 "$BIN/loadbpf" >"$WORK/loadbpf-enforce.out" 2>&1; rc=$?
@@ -298,10 +302,13 @@ HEAD
 TAIL
     } > "$OVERRIDE_YAML"
 
-    PROG_BEFORE_OV="$(prog_count)"
     tetra tracingpolicy add "$OVERRIDE_YAML" || die "failed to load the override enforce policy"
-    info "override policy loaded (allow-list: ${ALLOW[*]}); resident progs before: $PROG_BEFORE_OV"
+    info "override policy loaded (allow-list: ${ALLOW[*]})"
     sleep 1
+    # Baseline AFTER the override policy (and its own eBPF program) is resident, so
+    # the policy's program isn't miscounted as a false implant and a correctly
+    # BLOCKING Override isn't reported as a failure.
+    PROG_BEFORE_OV="$(prog_count)"
 
     info "running the non-allow-listed loader under OVERRIDE — expect: BPF_PROG_LOAD fails (EPERM), exit 1..."
     "$BIN/loadbpf" >"$WORK/loadbpf-override.out" 2>&1; orc=$?

@@ -113,7 +113,8 @@ records every request+result. It never performs a privileged action itself.
 
 ```sh
 # in /etc/collector/collector.env (0600):
-COLLECTOR_AGENT_SOCKET=/run/agentd.sock
+# Must match agentd-response.service's --response-socket (RuntimeDirectory /run/agentd).
+COLLECTOR_AGENT_SOCKET=/run/agentd/agentd.sock
 COLLECTOR_RESPONSE_TOKEN=<same value as AGENT_RESPONSE_TOKEN>
 ```
 
