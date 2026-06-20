@@ -252,8 +252,10 @@ func cmdRun(args []string) int {
 
 	if cfg.ResponseSocket != "" {
 		if err := startResponse(ctx, cfg); err != nil {
-			fmt.Fprintln(os.Stderr, "agentd: response:", err)
-			return 1
+			// A response-config problem must NEVER kill detection. Log loudly and
+			// carry on tailing — previously this returned, so a misconfigured (or
+			// defaulted) response socket silently aborted the whole detector.
+			fmt.Fprintf(os.Stderr, "<3>agentd: response socket NOT served: %v (detection continues)\n", err)
 		}
 	}
 

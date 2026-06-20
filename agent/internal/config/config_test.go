@@ -54,7 +54,13 @@ func TestResponseDefaultsAreSafe(t *testing.T) {
 	if d.ResponseToken != "" {
 		t.Error("ResponseToken should default empty (response fails closed)")
 	}
-	if d.ResponseSocket == "" || d.QuarantineDir == "" || d.ResponseMaxBody <= 0 {
+	// Response is OPT-IN: a non-empty default socket makes plain `agentd run`
+	// (detection) try to serve it and abort without a token — which is exactly
+	// the bug that broke detection on a real host. The default MUST be empty.
+	if d.ResponseSocket != "" {
+		t.Errorf("ResponseSocket must default EMPTY (response opt-in), got %q", d.ResponseSocket)
+	}
+	if d.QuarantineDir == "" || d.ResponseMaxBody <= 0 {
 		t.Errorf("response defaults=%+v", d)
 	}
 	if len(d.MgmtIfaces) == 0 || d.MgmtIfaces[0] != "lo" {

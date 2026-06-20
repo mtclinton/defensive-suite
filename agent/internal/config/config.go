@@ -93,9 +93,12 @@ func Defaults() Config {
 			"security_inode_setattr",
 		},
 
-		// M3 response: SAFE defaults. No socket path, no token, response disabled
-		// → DryRun stays true and nothing destructive can run.
-		ResponseSocket:  "/run/agentd.sock",
+		// M3 response: SAFE defaults. No socket path (response is OPT-IN via
+		// --response-socket / AGENT_RESPONSE_SOCKET), no token, response disabled
+		// → DryRun stays true and nothing destructive can run. A non-empty default
+		// here would make plain `agentd run` try to serve the socket and (without a
+		// token) abort before detection ever starts.
+		ResponseSocket:  "",
 		ResponseEnabled: false,
 		MgmtIfaces:      []string{"lo"},
 		QuarantineDir:   "/var/lib/agentd/quarantine",
