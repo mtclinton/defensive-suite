@@ -7,11 +7,17 @@
 #       project's build and CI never run a real install. <<<
 #
 # WHAT IT DOES (the safe, observe-only tier):
-#   - Builds all 8 Go modules as static binaries (CGO_ENABLED=0, version injected
-#     via -ldflags "-X main.version=$VERSION") and installs them to $PREFIX/bin.
+#   - Installs the suite binaries to $PREFIX/bin. A RELEASE TARBALL ships prebuilt
+#     binaries in bin/ next to this script — those are installed as-is (NO Go
+#     toolchain needed). A SOURCE CLONE has no bin/, so it builds all 8 Go modules
+#     as static binaries (CGO_ENABLED=0, version injected via
+#     -ldflags "-X main.version=$VERSION"). Force prebuilt with --from-bin.
 #   - Installs the collector service, the 6 detector .service+.timer pairs, and
 #     agentd.service (OBSERVE), and enables the timers + collector + agentd.
-#   - Creates /etc/{collector,agentd} (0750) + /var/lib/{collector,agentd} (0750).
+#   - Creates the config dirs /etc/{collector,agentd,<6 detectors>} (0750) and
+#     installs each detector's config.json from its deploy/config.example.json so
+#     the units' --config path exists; creates /var/lib/{collector,agentd,bpfsentry}
+#     (0750).
 #   - ONE-PASS TOKEN FAN-OUT: generates ONE bearer token (openssl rand -hex 32)
 #     and writes it to the collector AND every reporter's env so they all share
 #     one consistent token. Never overwrites an existing token on re-run.
@@ -29,6 +35,10 @@
 #                    and testing. Implies no systemctl calls.
 #   --version V      version string to inject (default: git describe / "dev")
 #   --dry-run        print every action, change nothing
+#   --from-bin       force installing prebuilt binaries from $SCRIPT_DIR/bin
+#                    (a release tarball ships them there); never run `go build`.
+#                    Auto-detected when that dir exists, so a tarball install
+#                    needs no Go toolchain.
 #   --uninstall      stop/disable units, remove binaries + units; KEEP data
 #   --purge          with --uninstall, also remove /etc + /var/lib data
 #   -h, --help       this help
@@ -36,6 +46,12 @@
 # A real (non --dry-run / non --destdir) install requires root.
 #
 set -euo pipefail
+
+# Private by birth: secret env files carry the bearer token, so make every file
+# and dir this script creates owner-only from the moment it is written. The
+# explicit chmods below only RELAX modes where it is safe (0644 units, 0755 bin,
+# 0750 dirs); secrets stay 0600 and are never world-readable, even transiently.
+umask 077
 
 # ---------------------------------------------------------------------------
 # Constants: the suite's module → binary → build-path map, and the unit lists.
@@ -93,8 +109,30 @@ REPORTERS=(
   "bpfsentry:bpfsentry.env:BPFSENTRY_WEBHOOK_AUTH:BPFSENTRY_WEBHOOK_URL:/ingest"
 )
 
+# Detector tools whose .service ExecStart passes `--config /etc/<tool>/<file>`.
+# Each entry is "module:config_filename:example_src" — install.sh installs the
+# tool's deploy/config.example.json to /etc/<tool>/<config_filename> when absent
+# (0640, not-overwrite). WITHOUT this the units exit 1 at startup with
+# "config: open /etc/<tool>/config.json: no such file". All six ship a
+# deploy/config.example.json and use the filename config.json (verified against
+# each unit's ExecStart --config path).
+CONFIG_TOOLS=(
+  "authwatch:config.json:deploy/config.example.json"
+  "credsentinel:config.json:deploy/config.example.json"
+  "instguard:config.json:deploy/config.example.json"
+  "posturescan:config.json:deploy/config.example.json"
+  "egresswatch:config.json:deploy/config.example.json"
+  "bpfsentry:config.json:deploy/config.example.json"
+)
+
 # Collector bind address used in the fanned-out reporter URLs.
 COLLECTOR_ADDR_DEFAULT="127.0.0.1:8787"
+
+# A release tarball ships prebuilt binaries in bin/ at the tarball root, next to
+# this install.sh (the release.yml `assemble` job and `make release-local` both
+# stage them there). If that dir exists we install those and SKIP `go build`, so
+# a tarball install needs NO Go toolchain. A clone has no bin/ → build from src.
+PREBUILT_BIN_DIR="$SCRIPT_DIR/bin"
 
 # ---------------------------------------------------------------------------
 # Options
@@ -105,6 +143,7 @@ VERSION=""
 DRY_RUN=0
 DO_UNINSTALL=0
 DO_PURGE=0
+FROM_BIN=0    # 1 = force prebuilt binaries (release tarball); see resolve_source().
 
 usage() {
   sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; s/^#$//' | sed '/^set -euo/d'
@@ -119,12 +158,20 @@ while [ $# -gt 0 ]; do
     --version)   VERSION="${2:?--version needs a value}"; shift 2 ;;
     --version=*) VERSION="${1#*=}"; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
+    --from-bin)  FROM_BIN=1; shift ;;
     --uninstall) DO_UNINSTALL=1; shift ;;
     --purge)     DO_PURGE=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     *) echo "install.sh: unknown argument: $1" >&2; echo "try: install.sh --help" >&2; exit 2 ;;
   esac
 done
+
+# FIX 8: --purge is meaningless (and dangerous) on its own — without --uninstall
+# the script would fall through to a full INSTALL and ignore the flag. Guard it.
+if [ "$DO_PURGE" -eq 1 ] && [ "$DO_UNINSTALL" -eq 0 ]; then
+  echo 'install.sh: --purge requires --uninstall' >&2
+  exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -224,6 +271,45 @@ build_all() {
   done
 }
 
+# install_prebuilt_binaries — install the per-binary files shipped in
+# $PREBUILT_BIN_DIR (a release tarball) into $BIN_DIR. No Go required.
+install_prebuilt_binaries() {
+  step "Install prebuilt binaries from $PREBUILT_BIN_DIR (no Go build)"
+  mkdirp 0755 "$PREFIX/bin"
+  local spec mod bin src
+  for spec in "${MODULES[@]}"; do
+    IFS=':' read -r mod bin _ <<<"$spec"
+    src="$PREBUILT_BIN_DIR/$bin"
+    if [ ! -f "$src" ]; then
+      echo "install.sh: prebuilt binary missing: $src" >&2
+      echo "            (a release tarball should ship bin/$bin; for a source clone, omit --from-bin)" >&2
+      exit 1
+    fi
+    log ">> $mod -> $bin (prebuilt)"
+    install_file 0755 "$src" "$BIN_DIR/$bin"
+  done
+}
+
+# resolve_source — decide whether to install prebuilt binaries or build from
+# source, and DO it. Prebuilt when --from-bin is set OR $PREBUILT_BIN_DIR exists
+# (a release tarball); otherwise build_all (needs Go, i.e. a source clone).
+resolve_source() {
+  if [ "$FROM_BIN" -eq 1 ]; then
+    if [ ! -d "$PREBUILT_BIN_DIR" ]; then
+      echo "install.sh: --from-bin given but no prebuilt bin dir at $PREBUILT_BIN_DIR" >&2
+      exit 1
+    fi
+    install_prebuilt_binaries
+    return
+  fi
+  if [ -d "$PREBUILT_BIN_DIR" ]; then
+    log "Found prebuilt binaries at $PREBUILT_BIN_DIR — installing those (no Go build needed)."
+    install_prebuilt_binaries
+    return
+  fi
+  build_all
+}
+
 # ---------------------------------------------------------------------------
 # Units + config + token fan-out
 # ---------------------------------------------------------------------------
@@ -294,11 +380,42 @@ EOF
   chmod 0600 "$f"
 }
 
+# repair_reporter_token MODULE ENVFILE AUTHVAR — heal token split-brain: if an
+# existing reporter env's Authorization token diverges from the shared token
+# (e.g. collector.env was deleted and regenerated but this reporter survived
+# with the OLD token), rewrite its auth line to match. Idempotent: a no-op when
+# it already agrees. Only the auth line is touched; the URL line is left alone.
+repair_reporter_token() {
+  local mod="$1" envfile="$2" authvar="$3"
+  local f; f="$(dest "/etc/$mod/$envfile")"
+  local want="$authvar=Bearer $SHARED_TOKEN"
+  local have
+  have="$(sed -n "s/^$authvar=\(..*\)$/\1/p" "$f" | head -n1)"
+  if [ "$have" = "Bearer $SHARED_TOKEN" ]; then
+    return 0   # already consistent
+  fi
+  log "Repairing token split-brain in /etc/$mod/$envfile ($authvar now matches the shared token)."
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf 'DRY-RUN: rewrite %s line in %s to the shared token\n' "$authvar" "$f"
+    return 0
+  fi
+  if grep -q "^$authvar=" "$f"; then
+    # Replace the existing auth line in place (preserve file mode).
+    local tmp; tmp="$(mktemp "${f}.XXXXXX")"
+    sed "s|^$authvar=.*|$want|" "$f" >"$tmp"
+    cat "$tmp" >"$f"   # keep original inode/perms (0600); never world-readable
+    rm -f "$tmp"
+  else
+    printf '%s\n' "$want" >>"$f"
+  fi
+}
+
 write_reporter_env() {
   local mod="$1" envfile="$2" authvar="$3" urlvar="$4" path="$5"
   local f; f="$(dest "/etc/$mod/$envfile")"
   if exists "/etc/$mod/$envfile"; then
     log "Keeping existing /etc/$mod/$envfile (token preserved)."
+    repair_reporter_token "$mod" "$envfile" "$authvar"
     return
   fi
   log "Writing /etc/$mod/$envfile (0600) — $authvar = same shared token"
@@ -322,6 +439,7 @@ write_agentd_env() {
   local f; f="$(dest /etc/agentd/agentd.env)"
   if exists /etc/agentd/agentd.env; then
     log "Keeping existing /etc/agentd/agentd.env (token preserved)."
+    repair_reporter_token "agentd" "agentd.env" "AGENT_COLLECTOR_AUTH"
     return
   fi
   log "Writing /etc/agentd/agentd.env (0600) — AGENT_COLLECTOR_AUTH = same shared token"
@@ -380,6 +498,38 @@ install_docs() {
   fi
 }
 
+# install_tool_configs — for every detector whose unit passes --config, install
+# the tool's deploy/config.example.json to /etc/<tool>/<config.json> when absent
+# (mode 0640, same not-overwrite pattern as the env files). This is what keeps
+# the six detectors from exiting 1 at startup on a missing config file. If a
+# tool ships no example, fall back to a minimal valid JSON ("{}") so the unit
+# still boots rather than die on a missing path.
+install_tool_configs() {
+  local spec mod cfgname examplerel src dst
+  for spec in "${CONFIG_TOOLS[@]}"; do
+    IFS=':' read -r mod cfgname examplerel <<<"$spec"
+    if exists "/etc/$mod/$cfgname"; then
+      log "Keeping existing /etc/$mod/$cfgname (operator config preserved)."
+      continue
+    fi
+    src="$SCRIPT_DIR/$mod/$examplerel"
+    if [ -f "$src" ]; then
+      log "Installing /etc/$mod/$cfgname (0640) from $examplerel"
+      install_file 0640 "$src" "/etc/$mod/$cfgname"
+    else
+      log "No $examplerel for $mod — writing minimal /etc/$mod/$cfgname ({})"
+      dst="$(dest "/etc/$mod/$cfgname")"
+      if [ "$DRY_RUN" -eq 1 ]; then
+        printf 'DRY-RUN: write minimal JSON to %s\n' "$dst"
+      else
+        mkdir -p "$(dirname "$dst")"
+        printf '{}\n' >"$dst"
+        chmod 0640 "$dst"
+      fi
+    fi
+  done
+}
+
 make_dirs_and_config() {
   step "Create config + state dirs and fan out the shared token"
   # config dirs 0750
@@ -389,8 +539,13 @@ make_dirs_and_config() {
     IFS=':' read -r mod _ _ _ _ <<<"$spec"
     mkdirp 0750 "/etc/$mod"
   done
-  # state dirs 0750
-  mkdirp 0750 /var/lib/collector /var/lib/agentd
+  # state dirs 0750 (bpfsentry needs /var/lib/bpfsentry: it is in the baseline
+  # unit's ReadWritePaths, and without it the unit fails namespace setup).
+  mkdirp 0750 /var/lib/collector /var/lib/agentd /var/lib/bpfsentry
+
+  # FIX 1: the detector units pass --config /etc/<tool>/config.json; install
+  # those config files so the detectors don't exit 1 on a missing path.
+  install_tool_configs
 
   ensure_token
   write_collector_env
@@ -431,7 +586,8 @@ post_install_summary() {
  Binaries:    $BIN_DIR  (8 static binaries)
  Units:       $SYSTEMD_DIR  (collector + 6 detectors + agentd OBSERVE)
  Config:      /etc/{collector,agentd,authwatch,credsentinel,instguard,posturescan,egresswatch,bpfsentry}
- State:       /var/lib/{collector,agentd}
+              (each detector's config.json installed from its config.example.json)
+ State:       /var/lib/{collector,agentd,bpfsentry}
  Token:       ONE bearer token shared by collector + all reporters (env-only, 0600).
 
  Running now (real install): collector.service, agentd.service (observe), and
@@ -504,7 +660,8 @@ do_uninstall() {
                "$(dest /etc/authwatch)" "$(dest /etc/credsentinel)" \
                "$(dest /etc/instguard)" "$(dest /etc/posturescan)" \
                "$(dest /etc/egresswatch)" "$(dest /etc/bpfsentry)" \
-               "$(dest /var/lib/collector)" "$(dest /var/lib/agentd)"
+               "$(dest /var/lib/collector)" "$(dest /var/lib/agentd)" \
+               "$(dest /var/lib/bpfsentry)"
   else
     log "Kept /etc/* and /var/lib/* data (tokens preserved). Use --purge to remove."
   fi
@@ -534,7 +691,7 @@ fi
 resolve_version
 log "defensive-suite installer — version to inject: $VERSION; prefix: $PREFIX"
 
-build_all
+resolve_source   # install prebuilt binaries (release tarball) or build from source (clone)
 install_units
 install_docs
 make_dirs_and_config

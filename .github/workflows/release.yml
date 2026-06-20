@@ -158,7 +158,9 @@ jobs:
           for arch in amd64 arm64; do
             stage="defensive-suite-${VERSION}-linux-${arch}"
             rm -rf "$stage"; mkdir -p "$stage/bin"
-            # Binaries
+            # Binaries go in bin/ at the tarball ROOT, next to install.sh. The
+            # shipped install.sh detects $SCRIPT_DIR/bin and installs these
+            # prebuilt binaries WITHOUT a Go toolchain (see resolve_source()).
             cp dl/binaries-${arch}/* "$stage/bin/"
             chmod +x "$stage/bin/"*
             # Each module's deploy/ tree (systemd units, config examples, sigma…)

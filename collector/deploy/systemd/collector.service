@@ -9,10 +9,11 @@ Type=simple
 # The ingest bearer token (COLLECTOR_TOKEN=...). Keep this file 0600; the token
 # is never passed on the command line (it would be visible in the process table).
 EnvironmentFile=/etc/collector/collector.env
-# Bind loopback by default. To accept reports from other hosts, change --addr to
-# a PRIVATE interface (e.g. the machine's Tailscale IP) — never 0.0.0.0 on an
-# untrusted network.
-ExecStart=/usr/local/bin/collector --addr 127.0.0.1:8787 --data %S/collector
+# Bind loopback by default (config.Defaults() = 127.0.0.1:8787). To accept reports
+# from other hosts, set COLLECTOR_ADDR to a PRIVATE interface (e.g. the machine's
+# Tailscale IP) in collector.env — never 0.0.0.0 on an untrusted network. No --addr
+# flag here: a CLI flag would OVERRIDE COLLECTOR_ADDR, so the env stays authoritative.
+ExecStart=/usr/local/bin/collector --data %S/collector
 Restart=on-failure
 RestartSec=3
 Nice=5

@@ -38,7 +38,13 @@ ProtectHome=true
 # that point baseline_path at a local path. Both are listed so ProtectSystem=strict
 # does not EROFS the layer-1 trust-anchor capture. Keep this in sync with
 # baseline_path in config.json.
-ReadWritePaths=/mnt/trust-anchor /var/lib/bpfsentry
+#
+# The `-` prefix on /mnt/trust-anchor makes it OPTIONAL: it is an operator-
+# provisioned off-host mount that is absent on a fresh box, and without the `-`
+# the unit fails namespace setup ("Failed to set up mount namespacing"). With it,
+# the shipped unit is bootable even before the anchor is mounted; install.sh
+# creates /var/lib/bpfsentry so that path is always present.
+ReadWritePaths=-/mnt/trust-anchor /var/lib/bpfsentry
 ProtectKernelTunables=true
 ProtectKernelLogs=true
 ProtectControlGroups=true

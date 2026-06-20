@@ -61,41 +61,52 @@ Front-loaded by attack probability and quick wins:
 ## Install
 
 The shipped [`install.sh`](install.sh) sets up the **detection / observe tier** safely: it
-builds all 8 Go modules as static, version-injected binaries, installs the collector +
-the six detector `.service`/`.timer` pairs + `agentd` (observe), creates the config/state
-dirs, and generates **one** bearer token that it fans out to the collector and every
-reporter so they all agree. It is review-first and idempotent — re-running never clobbers
-an existing token, and it **does not** arm response/enforce (those stay manual; see
+installs the suite binaries, the collector + the six detector `.service`/`.timer` pairs +
+`agentd` (observe), creates the config/state dirs (installing each detector's `config.json`
+from its `config.example.json`), and generates **one** bearer token that it fans out to the
+collector and every reporter so they all agree. A **release tarball** ships the binaries
+prebuilt in `bin/`, so installing from one needs **no Go toolchain**; a **source clone** has
+no `bin/`, so the installer builds the 8 Go modules itself (needs Go). It is review-first and
+idempotent — re-running never clobbers an existing token (and heals a divergent reporter
+token back to the shared one), and it **does not** arm response/enforce (those stay manual; see
 [`agent/deploy/RESPONSE.md`](agent/deploy/RESPONSE.md) and
 [`agent/deploy/ENFORCE.md`](agent/deploy/ENFORCE.md)).
 
-**From a clone** (no `curl | sh` — read the script first):
+**From a clone** (no `curl | sh` — read the script first; **needs Go** to build):
 
 ```sh
 git clone https://github.com/mtclinton/defensive-suite
 cd defensive-suite
 less install.sh                 # review before running
-sudo ./install.sh               # build + install the observe tier (needs root)
+sudo ./install.sh               # build + install the observe tier (needs root + Go)
 # or, preview / stage without touching the system:
 ./install.sh --dry-run                       # print every action, change nothing
 ./install.sh --destdir /tmp/stage            # lay the whole tree under /tmp/stage
 ```
 
 Useful flags: `--prefix DIR` (default `/usr/local`), `--version V` (default
-`git describe`), `--uninstall` (keeps `/etc` + `/var/lib` data), `--uninstall --purge`
-(also removes data), `-h`. The collector serves the dashboard locally at
-`http://127.0.0.1:8787/` once running.
+`git describe`), `--from-bin` (force prebuilt binaries from `bin/`, never build),
+`--uninstall` (keeps `/etc` + `/var/lib` data), `--uninstall --purge` (also removes
+data; `--purge` requires `--uninstall`), `-h`. The collector serves the dashboard
+locally at `http://127.0.0.1:8787/` once running.
 
-**From a release tarball / AppImage** — each tag publishes static **linux-amd64** and
-**linux-arm64** tarballs (binaries + `deploy/` trees + `install.sh` + dashboard + docs,
-with `SHA256SUMS`) plus the desktop **console AppImage** (amd64 only):
+**From a release tarball / AppImage** (**no Go needed** — binaries ship prebuilt in
+`bin/`) — each tag publishes static **linux-amd64** and **linux-arm64** tarballs
+(`bin/` + `deploy/` trees + `install.sh` + dashboard + docs) plus the desktop **console
+AppImage** (amd64 only) and one `SHA256SUMS` over every release asset. Download the
+tarball for your arch, the AppImage, and `SHA256SUMS` into the same directory, then:
 
 ```sh
+# 1. Verify the downloads first, in the directory you downloaded them to.
+sha256sum -c --ignore-missing SHA256SUMS
+# 2. Extract the tarball and enter it.
 tar xzf defensive-suite-<version>-linux-amd64.tar.gz
 cd defensive-suite-<version>-linux-amd64
-sha256sum -c ../SHA256SUMS       # verify the download
-sudo ./install.sh                # the same installer, prebuilt binaries
-chmod +x defensive-suite-console-<version>-amd64.AppImage && ./defensive-suite-console-<version>-amd64.AppImage
+sudo ./install.sh                # the same installer, prebuilt binaries (no Go)
+# 3. The console AppImage is a separate top-level asset (not inside the tarball).
+cd ..
+chmod +x defensive-suite-console-<version>-amd64.AppImage
+./defensive-suite-console-<version>-amd64.AppImage
 ```
 
 Or via the top-level **Makefile**: `make build` (all 8 binaries into `./bin`),
