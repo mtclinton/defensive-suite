@@ -1,0 +1,78 @@
+name: VM validation (Tetragon)
+
+# Manual only. Runs the end-to-end validation harness on the ephemeral Ubuntu
+# runner — a real, throwaway Linux VM (kernel + BTF, root, destroyed after the
+# run). It installs Tetragon, then drives validation/validate.sh through the live
+# detect -> enforce (SIGKILL) -> respond loop. This is the kernel-touching proof
+# CI's build/test cannot give; it is opt-in (workflow_dispatch), never on push.
+on:
+  workflow_dispatch:
+    inputs:
+      with_response:
+        description: "also run stage 4 (live kill via collector -> agentd)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+
+      - name: system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            linux-libc-dev build-essential nftables jq curl ca-certificates
+
+      - name: kernel facts (BTF etc.)
+        run: |
+          uname -srm
+          ls -l /sys/kernel/btf/vmlinux || echo "no BTF (Tetragon needs it)"
+          systemd-detect-virt || true
+
+      - name: install Tetragon (standalone) + enable JSON export
+        run: |
+          set -euxo pipefail
+          TAG="$(curl -fsSL https://api.github.com/repos/cilium/tetragon/releases/latest | jq -r .tag_name)"
+          echo "installing Tetragon $TAG"
+          curl -fsSL "https://github.com/cilium/tetragon/releases/download/${TAG}/tetragon-${TAG}-amd64.tar.gz" -o /tmp/tetragon.tgz
+          tar -C /tmp -xzf /tmp/tetragon.tgz
+          sudo "/tmp/tetragon-${TAG}-amd64/install.sh"
+          # agentd tails this JSON export; make sure Tetragon writes it.
+          sudo mkdir -p /etc/tetragon/tetragon.conf.d
+          echo '/var/log/tetragon/tetragon.log' | sudo tee /etc/tetragon/tetragon.conf.d/export-filename
+          sudo systemctl restart tetragon
+          for _ in $(seq 1 40); do
+            systemctl is-active --quiet tetragon && [ -s /var/log/tetragon/tetragon.log ] && break
+            sleep 1
+          done
+          systemctl is-active tetragon
+          sudo ls -l /var/log/tetragon/
+          tetra version
+
+      - name: run the validation harness
+        run: |
+          set -x
+          ARGS="-y --force-baremetal --keep"   # runner is ephemeral; --keep preserves logs for the dump step
+          [ "${{ inputs.with_response }}" = "true" ] && ARGS="$ARGS --with-response"
+          sudo env "PATH=$PATH" AGENT_TETRAGON_LOG=/var/log/tetragon/tetragon.log \
+            ./validation/validate.sh $ARGS
+
+      - name: diagnostics (always)
+        if: always()
+        run: |
+          echo "===== harness logs ====="
+          for f in /tmp/dsuite-validate.*/*.log /tmp/dsuite-validate.*/*.out; do
+            [ -f "$f" ] && { echo "--- $f ---"; sudo cat "$f"; }
+          done
+          echo "===== loaded tracing policies ====="; sudo tetra tracingpolicy list || true
+          echo "===== tetragon journal (tail) ====="; sudo journalctl -u tetragon --no-pager | tail -50 || true
+          echo "===== dmesg (tail) ====="; sudo dmesg | tail -30 || true
