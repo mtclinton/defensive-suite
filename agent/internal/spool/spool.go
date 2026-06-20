@@ -5,6 +5,15 @@
 // flush window of findings — fail-silent is the worst failure mode for a
 // detector. The spool is bounded (by count and bytes); when it overflows the
 // OLDEST report is dropped with a LOUD stderr warning, never silently.
+//
+// DELIVERY SEMANTICS: at-least-once. If a POST actually succeeded but agentd never
+// saw the ACK (the connection dropped after the collector committed), the report
+// is spooled and re-POSTed next flush — so the collector, whose Append
+// accumulation does not de-duplicate, can DOUBLE-COUNT those findings after an
+// outage. This over-reports counts; it never loses or fabricates a distinct
+// finding. A stable per-report ID + collector-side de-dup would make it
+// exactly-once; deferred, since the counts are advisory and the lost-ACK case is
+// rare.
 package spool
 
 import (
@@ -133,7 +142,7 @@ func (s *Spool) enforceBound() {
 	seqs := s.list()
 	// Count cap: drop oldest until within maxReports.
 	for len(seqs) > s.maxReports {
-		s.dropOldest(seqs[0], "count cap %d exceeded")
+		s.dropOldest(seqs[0], fmt.Sprintf("count cap %d exceeded", s.maxReports))
 		seqs = seqs[1:]
 	}
 	// Byte cap: sum sizes, drop oldest until within maxBytes.
@@ -147,7 +156,7 @@ func (s *Spool) enforceBound() {
 	}
 	for total > s.maxBytes && len(seqs) > 0 {
 		oldest := seqs[0]
-		s.dropOldest(oldest, "byte cap exceeded")
+		s.dropOldest(oldest, fmt.Sprintf("byte cap %d bytes exceeded", s.maxBytes))
 		total -= sizes[oldest]
 		seqs = seqs[1:]
 	}
@@ -157,9 +166,8 @@ func (s *Spool) enforceBound() {
 // the sd-daemon level journald reads). NEVER silent: a dropped finding the
 // operator can't see is exactly the fail-silent mode this whole feature exists to
 // prevent.
-func (s *Spool) dropOldest(seq uint64, reasonFmt string) {
+func (s *Spool) dropOldest(seq uint64, reason string) {
 	_ = os.Remove(filepath.Join(s.dir, fileName(seq)))
-	reason := fmt.Sprintf(reasonFmt, s.maxReports)
 	fmt.Fprintf(s.warn, "<4>agent[spool] WARNING: dropped OLDEST spooled report %s (%s); collector outage longer than the spool can hold\n",
 		fileName(seq), reason)
 }
@@ -177,7 +185,7 @@ func (s *Spool) Replay(post PostFn) (int, error) {
 		if err != nil {
 			// Unreadable spooled file: drop it (it can never be delivered) and warn,
 			// rather than wedging replay forever on a corrupt entry.
-			s.dropOldest(seq, "unreadable spool file (cap %d)")
+			s.dropOldest(seq, "unreadable spool file")
 			continue
 		}
 		if err := post(data); err != nil {

@@ -270,9 +270,13 @@ func TailWithState(ctx context.Context, path, statePath string, poll time.Durati
 				buf = nil
 			}
 			leftover = append([]byte(nil), buf...)
-			// Persist after each read batch: the offset just advanced, so a restart
-			// now resumes here rather than re-reading or skipping.
-			saveCheckpoint(statePath, checkpoint{Inode: ino, Offset: offset})
+			// Persist the offset at the START of the unconsumed partial line — its
+			// bytes are held only in memory (leftover), so a restart must re-read
+			// and reassemble that line, not skip it. (In the drop case leftover is
+			// empty, so the full offset is persisted and the discarded bytes are
+			// intentionally not re-read.) Persisting the full offset here would
+			// silently drop a finding-bearing line that straddles a restart.
+			saveCheckpoint(statePath, checkpoint{Inode: ino, Offset: offset - int64(len(leftover))})
 		}
 	}
 }

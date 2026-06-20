@@ -360,6 +360,67 @@ func TestTailResumesOnInodeMatch(t *testing.T) {
 	}
 }
 
+// A line that straddles a restart must be REASSEMBLED, not dropped: the checkpoint
+// records the offset at the START of the unconsumed partial line (its bytes live
+// only in memory), so a fresh Tail re-reads it. Persisting the full offset (the
+// bug) would skip "beta-par" and emit the corrupt fragment "tial".
+func TestTailReassemblesPartialLineAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "t.log")
+	state := filepath.Join(dir, "tail.state")
+	if err := os.WriteFile(p, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// tailer #1: consume a full line, then read a PARTIAL line (no newline).
+	got1 := make(chan string, 8)
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan struct{})
+	go func() {
+		defer close(done1)
+		_ = TailWithState(ctx1, p, state, 10*time.Millisecond, func(l string) { got1 <- l })
+	}()
+	time.Sleep(120 * time.Millisecond) // capture the initial (empty) offset
+	appendStr(t, p, "alpha\n")
+	if l := <-got1; l != "alpha" {
+		cancel1()
+		<-done1
+		t.Fatalf("want alpha, got %q", l)
+	}
+	appendStr(t, p, "beta-par")        // partial: no trailing newline
+	time.Sleep(150 * time.Millisecond) // let the tailer poll-read the partial
+	if c, ok := loadCheckpoint(state); !ok || c.Offset != int64(len("alpha\n")) {
+		cancel1()
+		<-done1
+		t.Fatalf("checkpoint must sit at the partial-line start %d, got %+v", len("alpha\n"), c)
+	}
+	cancel1()
+	<-done1
+
+	// downtime: complete the partial line; a fresh Tail must reassemble it.
+	appendStr(t, p, "tial\n") // "beta-par" + "tial" = "beta-partial"
+	got2 := startTail(t, p, state)
+	select {
+	case l := <-got2:
+		if l != "beta-partial" {
+			t.Errorf("partial line not reassembled across restart: got %q (want beta-partial)", l)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("resume did not deliver the reassembled line")
+	}
+}
+
+func appendStr(t *testing.T, path, s string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(s); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+}
+
 // On an inode MISMATCH (rotation into a different file), the stale offset is
 // IGNORED and Tail starts at EOF — seeking the saved offset into a different file
 // would read the wrong bytes. Only genuinely new appends are delivered.

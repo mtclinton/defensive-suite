@@ -257,6 +257,31 @@ func TestHeartbeatsCoalesceNoChurn(t *testing.T) {
 	}
 }
 
+// A clean agent's coalesced heartbeat (freshest Received, but pinned in place at
+// its original slice index) must survive the COUNT cap when another tool floods
+// the store with older reports — the cap drops genuinely-oldest by time, not by
+// slice position. Otherwise a live clean agent silently vanishes from Summary.
+func TestHeartbeatSurvivesCountCapFlood(t *testing.T) {
+	s, _ := New(t.TempDir(), 0, 3) // tiny count cap
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	s.staleAfter = 90 * time.Second
+	// the agent posts ONLY a (recent) heartbeat — no findings report.
+	s.AddReport(Report{Tool: "agent", Host: "h", Received: now.Add(-5 * time.Second), Append: true})
+	// another tool floods with OLDER real reports, well past maxReports.
+	for i := 0; i < 12; i++ {
+		s.AddReport(Report{Tool: "busy", Host: "h", Time: now.Add(-time.Hour), Received: now.Add(-time.Hour),
+			Findings: []Finding{{Severity: "low"}}})
+	}
+	ts, ok := toolByName(s.Summary(), "agent")
+	if !ok {
+		t.Fatal("clean agent vanished from Summary after a count-cap flood (heartbeat evicted by slice position)")
+	}
+	if ts.Stale {
+		t.Errorf("agent heartbeat 5s ago should still be fresh: %+v", ts)
+	}
+}
+
 // A tool with no recorded receive time is treated as stale (no evidence of life)
 // with a sentinel age of -1.
 func TestSummaryNeverSeenIsStale(t *testing.T) {

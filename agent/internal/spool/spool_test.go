@@ -152,6 +152,15 @@ func TestByteCapDropsOldestWithWarning(t *testing.T) {
 	if !strings.Contains(warn.String(), "<4>") {
 		t.Errorf("byte-cap drop must warn loudly: %q", warn.String())
 	}
+	// The warning must be a clean operator message — NOT a Go format artifact. The
+	// byte-cap path passed a no-verb string to a %d Sprintf, yielding the literal
+	// "%!(EXTRA int=...)" in the operator-facing warning.
+	if strings.Contains(warn.String(), "%!") {
+		t.Errorf("byte-cap warning has a format artifact: %q", warn.String())
+	}
+	if !strings.Contains(warn.String(), "byte cap") {
+		t.Errorf("byte-cap warning should name the byte cap: %q", warn.String())
+	}
 }
 
 // A restart re-opens the same dir and keeps appending past the existing backlog

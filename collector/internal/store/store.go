@@ -141,6 +141,13 @@ func (s *Store) prune() {
 		s.reports = kept
 	}
 	if s.maxReports > 0 && len(s.reports) > s.maxReports {
+		// Drop the genuinely-OLDEST by receive time, not by slice position. A
+		// coalesced heartbeat is updated in place (it keeps its original index) yet
+		// carries a FRESH Received, so a position-based trim would evict it ahead of
+		// stale real reports and make a live (clean) agent vanish from Summary.
+		sort.SliceStable(s.reports, func(i, j int) bool {
+			return reportTime(s.reports[i]).Before(reportTime(s.reports[j]))
+		})
 		s.reports = append([]Report(nil), s.reports[len(s.reports)-s.maxReports:]...)
 	}
 }
