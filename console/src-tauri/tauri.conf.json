@@ -27,9 +27,16 @@
     "targets": ["deb", "appimage"],
     "icon": ["icons/icon.png"],
     "category": "Utility",
-    "shortDescription": "defensive-suite endpoint console"
+    "shortDescription": "defensive-suite endpoint console",
+    "createUpdaterArtifacts": false
   },
   "plugins": {
-    "notification": {}
+    "notification": {},
+    "updater": {
+      "endpoints": [
+        "https://github.com/mtclinton/defensive-suite/releases/latest/download/latest.json"
+      ],
+      "pubkey": "PLACEHOLDER_REPLACE_VIA_make_console-keygen__UPDATER_IS_INERT_UNTIL_SET"
+    }
   }
 }

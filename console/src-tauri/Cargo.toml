@@ -17,6 +17,12 @@ serde_json = "1"
 # tiny blocking HTTP client to poll the local collector from the background thread
 ureq = "2"
 
+# Self-update (desktop only). INERT until the operator runs `make console-keygen`
+# and pastes the PUBLIC key into tauri.conf plugins.updater.pubkey + flips
+# createUpdaterArtifacts; the PRIVATE key is a CI secret, never in this repo.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+tauri-plugin-updater = "2"
+
 [profile.release]
 opt-level = "s"
 lto = true

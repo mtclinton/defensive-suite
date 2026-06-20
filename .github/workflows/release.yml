@@ -109,11 +109,29 @@ jobs:
       - name: Install tauri-cli
         run: cargo install tauri-cli --locked
 
-      - name: Build the AppImage
+      # Build the AppImage. The updater signature + latest.json are produced ONLY
+      # when the operator has supplied the signing key as a secret (mapped to env
+      # below). The gate is a shell `[ -n "$TAURI_SIGNING_PRIVATE_KEY" ]` test —
+      # NOT a job-level secret `if` — so forks / the workflow_dispatch dry-run
+      # (no secret) fall through to the EXISTING unsigned build path and stay green.
+      - name: Build the AppImage (signed updater artifacts when the key is present)
         working-directory: console
-        run: cargo tauri build --bundles appimage
+        env:
+          # Secrets → env. Absent on forks / dry-run → empty string → unsigned path.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo ">> signing key present → building with createUpdaterArtifacts (produces .AppImage.sig)"
+            cargo tauri build --bundles appimage \
+              --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          else
+            echo ">> no signing key → unsigned AppImage only (no updater artifacts)"
+            cargo tauri build --bundles appimage
+          fi
 
-      - name: Collect the AppImage
+      - name: Collect the AppImage (+ updater .sig when signed)
         run: |
           set -euo pipefail
           mkdir -p out
@@ -122,14 +140,25 @@ jobs:
           if [ -z "$found" ]; then
             echo "::error::no AppImage produced"; find console/src-tauri/target -name '*.AppImage' || true; exit 1
           fi
-          cp "$found" "out/defensive-suite-console-${VERSION}-amd64.AppImage"
+          appimage_name="defensive-suite-console-${VERSION}-amd64.AppImage"
+          cp "$found" "out/${appimage_name}"
+          # When signing was on, Tauri emits "<bundle>.sig" next to the AppImage.
+          # Carry it forward under the SAME basename as the release asset so the
+          # assemble job can read its contents into latest.json.
+          if [ -f "${found}.sig" ]; then
+            cp "${found}.sig" "out/${appimage_name}.sig"
+            echo ">> updater signature collected: out/${appimage_name}.sig"
+          else
+            echo ">> no .sig produced (unsigned build) — updater artifacts skipped"
+          fi
           ls -l out
 
-      - name: Upload the AppImage
+      - name: Upload the AppImage (+ .sig if present)
         uses: actions/upload-artifact@v4
         with:
           name: appimage-amd64
-          path: out/*.AppImage
+          # Globs both the AppImage and the optional .sig.
+          path: out/defensive-suite-console-*
           retention-days: 1
           if-no-files-found: error
 
@@ -180,25 +209,73 @@ jobs:
             tar -czf "dist/${stage}.tar.gz" "$stage"
             rm -rf "$stage"
           done
-          # Include the amd64 AppImage as a top-level release asset.
+          # Include the amd64 AppImage (and its updater .sig, if the signed build
+          # produced one) as top-level release assets.
           cp dl/appimage-amd64/*.AppImage dist/ 2>/dev/null || true
-          # One SHA256SUMS over everything in dist/.
+          cp dl/appimage-amd64/*.AppImage.sig dist/ 2>/dev/null || true
+          # One SHA256SUMS over everything in dist/ (latest.json is generated
+          # AFTER this and is the updater manifest, not a checksummed asset).
           ( cd dist && sha256sum * > SHA256SUMS )
           echo "--- release artifacts ---"
           ls -l dist
           cat dist/SHA256SUMS
 
+      # Generate the updater manifest ONLY when the signed build produced a .sig.
+      # latest.json is the static manifest the console's updater polls (see the
+      # endpoint in tauri.conf). The url points at the GitHub release download of
+      # the signed AppImage; the signature is the verbatim contents of its .sig.
+      # No .sig (dry-run / forks / signing not enabled) → no latest.json, build
+      # stays green and the release carries no updater manifest.
+      - name: Generate updater latest.json (only when a signature is present)
+        run: |
+          set -euo pipefail
+          sig_file="$(find dl/appimage-amd64 -name '*.AppImage.sig' -print -quit || true)"
+          if [ -z "$sig_file" ]; then
+            echo ">> no .AppImage.sig — updater not enabled this run; skipping latest.json"
+            exit 0
+          fi
+          appimage_name="defensive-suite-console-${VERSION}-amd64.AppImage"
+          signature="$(cat "$sig_file")"
+          pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          download_url="https://github.com/mtclinton/defensive-suite/releases/download/${VERSION}/${appimage_name}"
+          # Tauri's static-manifest schema: {version, notes, pub_date, platforms{...}}.
+          # version is the tag (e.g. v1.2.3 — must match the bundled app version).
+          jq -n \
+            --arg version "${VERSION}" \
+            --arg notes "defensive-suite console ${VERSION}" \
+            --arg pub_date "${pub_date}" \
+            --arg signature "${signature}" \
+            --arg url "${download_url}" \
+            '{
+               version: $version,
+               notes: $notes,
+               pub_date: $pub_date,
+               platforms: {
+                 "linux-x86_64": { signature: $signature, url: $url }
+               }
+             }' > dist/latest.json
+          echo "--- latest.json ---"
+          cat dist/latest.json
+
       # --- TAG PUSH: publish a GitHub Release with all artifacts ---------------
+      # latest.json + the .AppImage.sig are included ONLY when the signed build
+      # produced them (updater enabled); otherwise the release ships the same
+      # unsigned assets as before. The latest.json asset must keep that exact
+      # filename so the console's `releases/latest/download/latest.json` endpoint
+      # resolves on the newest release.
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          assets=(dist/*.tar.gz dist/*.AppImage dist/SHA256SUMS)
+          [ -f dist/latest.json ] && assets+=(dist/latest.json)
+          for s in dist/*.AppImage.sig; do [ -e "$s" ] && assets+=("$s"); done
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            dist/*.tar.gz dist/*.AppImage dist/SHA256SUMS
+            "${assets[@]}"
 
       # --- workflow_dispatch DRY-RUN: upload artifacts, publish NOTHING --------
       - name: Upload release artifacts (dry-run, no Release published)

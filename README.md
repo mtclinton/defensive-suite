@@ -109,6 +109,11 @@ chmod +x defensive-suite-console-<version>-amd64.AppImage
 ./defensive-suite-console-<version>-amd64.AppImage
 ```
 
+The console can **self-update** (opt-in, signature-verified) once the operator
+runs keygen — it ships **inert** with a placeholder key and updates nothing by
+default; the signing key stays a CI secret, never in the repo. See
+[`console/UPDATING.md`](console/UPDATING.md).
+
 Or via the top-level **Makefile**: `make build` (all 8 binaries into `./bin`),
 `make install` (runs `install.sh`; pass `FLAGS="--destdir /tmp/x"`),
 `make release-local` (per-arch tarballs in `./dist`), `make VERSION=v1.2.3 build` to pin

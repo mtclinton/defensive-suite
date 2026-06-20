@@ -54,6 +54,21 @@ The window loads the dashboard, which pulls live findings from the local
 collector (`http://127.0.0.1:8787` by default; override the poller with
 `DSUITE_COLLECTOR`). Start the collector first (`collector/`).
 
+## Self-update (opt-in, signed)
+
+The console can update itself via the **Tauri v2 updater**: on launch it does one
+silent check against a static `latest.json` on the GitHub release and — only when
+you ask, never automatically — downloads a **signature-verified** AppImage and
+relaunches (`check_update` / `install_update` commands; a native notification when
+a new version appears). It is **INERT until you complete keygen**: the committed
+config ships a clearly-marked **placeholder** public key and
+`createUpdaterArtifacts: false`, so the default build (and CI's no-secret dry-run)
+stays green and never updates. The **private** signing key and any OS code-signing
+certs are operator-owned CI secrets — never in this repo. Full enablement runbook
+(keygen, the two GitHub secrets, how `latest.json` is published, plus mac/Windows
+OS code-signing) is in [`UPDATING.md`](UPDATING.md), and the keypair is generated
+with `make console-keygen`.
+
 ## Notes
 
 - The app embeds `../dashboard/index.html` directly (`frontendDist`), so there is

@@ -32,7 +32,7 @@ BINDIR  := bin
 DISTDIR := dist
 RELEASE_ARCHES := amd64 arm64
 
-.PHONY: all build install release-local clean test lint tidy version
+.PHONY: all build install release-local clean test lint tidy version console-keygen
 
 all: build
 
@@ -78,6 +78,24 @@ release-local:
 	done
 	@( cd $(DISTDIR) && sha256sum *.tar.gz > SHA256SUMS )
 	@echo ">> release tarballs:"; ls -l $(DISTDIR)
+
+## console-keygen — generate the Tauri UPDATER signing keypair (operator-only).
+## The console's self-update is INERT until you run this and complete the 3 steps
+## it prints. The PRIVATE key NEVER goes in this repo — it is a CI secret. Needs
+## the Tauri CLI (cargo install tauri-cli --version '^2'). See console/UPDATING.md.
+console-keygen:
+	@cd console/src-tauri && cargo tauri signer generate -w "$$HOME/.tauri/defensive-suite-updater.key"
+	@echo ""
+	@echo ">> Updater keypair generated. The console is INERT until you finish:"
+	@echo "   1. Paste the printed PUBLIC key into console/src-tauri/tauri.conf.json"
+	@echo "      at plugins.updater.pubkey (replace the PLACEHOLDER)."
+	@echo "   2. Add the PRIVATE key + its password as GitHub Actions secrets:"
+	@echo "        TAURI_SIGNING_PRIVATE_KEY            (contents of ~/.tauri/defensive-suite-updater.key)"
+	@echo "        TAURI_SIGNING_PRIVATE_KEY_PASSWORD   (the password you just set)"
+	@echo "      DO NOT commit the private key (~/.tauri/defensive-suite-updater.key) anywhere."
+	@echo "   3. The release job auto-enables createUpdaterArtifacts once the secret"
+	@echo "      is present; to build a signed AppImage locally, set createUpdaterArtifacts"
+	@echo "      true (or pass --config '{\"bundle\":{\"createUpdaterArtifacts\":true}}')."
 
 ## version — print the version that would be injected
 version:
