@@ -69,8 +69,11 @@ func TestTailFollowsAppends(t *testing.T) {
 	got := make(chan string, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = Tail(ctx, p, 20*time.Millisecond, func(l string) { got <- l }) }()
+	go func() { _ = Tail(ctx, p, 10*time.Millisecond, func(l string) { got <- l }) }()
 
+	// Tail starts at end-of-file (only new events), so the append must happen
+	// after Tail has captured the initial empty offset — give it a few poll cycles.
+	time.Sleep(150 * time.Millisecond)
 	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
 	_, _ = f.WriteString("line one\nline two\n")
 	_ = f.Close()
@@ -81,7 +84,7 @@ func TestTailFollowsAppends(t *testing.T) {
 			if !strings.HasPrefix(l, "line ") {
 				t.Errorf("unexpected line %q", l)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(3 * time.Second):
 			t.Fatal("tail did not deliver appended lines")
 		}
 	}
