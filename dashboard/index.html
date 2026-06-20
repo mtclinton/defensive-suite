@@ -79,6 +79,25 @@
     border:1px solid rgba(124,156,255,.2);border-radius:6px;padding:1px 6px;white-space:nowrap}
   .empty{padding:34px;text-align:center;color:var(--muted)}
 
+  /* correlation layer: a confidence badge + the exec→egress lineage on a finding.
+     Only correlated / real-time (agent) findings carry these; the scheduled
+     detectors report without them, so this markup is purely additive. */
+  .conf{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;
+    padding:1px 7px;border-radius:999px;text-transform:uppercase;letter-spacing:.05em;margin-left:7px;vertical-align:middle}
+  .conf-high{color:var(--accent);background:rgba(51,214,192,.12);border:1px solid rgba(51,214,192,.35)}
+  .conf-medium{color:var(--med);background:rgba(245,196,81,.1);border:1px solid rgba(245,196,81,.28)}
+  .conf-low{color:var(--faint);background:rgba(125,135,148,.08);border:1px solid var(--line2)}
+  .lineage{margin-top:6px;display:flex;flex-direction:column;gap:2px}
+  .lineage .rl{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .lineage .rl::before{content:"↳ ";color:var(--faint)}
+  .lineage .rl.chain{color:var(--accent2)}
+  tr.correlated td{background:linear-gradient(90deg,rgba(255,77,94,.07),transparent 55%)}
+  tr.correlated:hover td{background:linear-gradient(90deg,rgba(255,77,94,.1),#0e141d 55%)}
+  tr.correlated td:first-child{box-shadow:inset 3px 0 0 var(--crit)}
+  .corrtag{font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.06em;color:var(--crit);
+    background:rgba(255,77,94,.12);border:1px solid rgba(255,77,94,.32);border-radius:5px;padding:1px 6px;
+    text-transform:uppercase;white-space:nowrap}
+
   .tools{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
   .tcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;
     display:flex;flex-direction:column;gap:8px}
@@ -247,6 +266,14 @@ const SAMPLE = [
   {tool:"bpfsentry", check:"baseline", severity:"high", title:"BPF program uses a suspicious helper", detail:"bpf_probe_write_user on an allowlisted-looking program", path:"prog:tag=ab12…", technique:"T1562.001"},
   {tool:"bpfsentry", check:"baseline", severity:"critical", title:"unnamed kretprobe attached at a hook nobody can name", detail:"not in the early-boot allowlist", path:"prog:id=512", technique:"T1014"},
   {tool:"bpfsentry", check:"status", severity:"info", title:"Tetragon recorded 0 unexpected bpf() loads", detail:"load-time visibility healthy", path:""},
+
+  /* ---- agentd real-time tier: stateful correlation (exec_id-keyed) ----
+     Base real-time findings carry a confidence; the correlator pairs a suspicious
+     exec with a later egress from the SAME process (by exec_id) and escalates the
+     pair into ONE Critical "connected out" C2 finding, with the process lineage. */
+  {tool:"agent", check:"realtime.correlated", severity:"critical", title:"suspicious process then connected out", detail:"/tmp/.cache/.x (execution from a staging directory) connected to 23.254.164.123:4444", path:"/tmp/.cache/.x", technique:"T1071", confidence:"high", related:["base: execution from a staging directory","base technique=T1059","dst=23.254.164.123:4444","lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]","ancestor previously flagged suspicious"]},
+  {tool:"agent", check:"realtime.exec", severity:"high", title:"execution from a staging directory", detail:"/tmp/.cache/.x spawned under a world-writable path", path:"/tmp/.cache/.x", technique:"T1059", confidence:"medium", related:["lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]"]},
+  {tool:"agent", check:"realtime.bpf", severity:"high", title:"non-allowlisted eBPF program load", detail:"loader /tmp/.cache/.x is not in the BPF loader allowlist", path:"/tmp/.cache/.x", technique:"T1014", confidence:"medium"},
 ];
 
 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
@@ -295,21 +322,26 @@ function renderRows(){
   const q=$("#q").value.toLowerCase(), ft=$("#fTool").value, fs=$("#fSev").value, fx=$("#fTech").value;
   const rows = DATA.filter(f=>{
     if(ft&&f.tool!==ft)return false; if(fs&&f.severity!==fs)return false; if(fx&&f.technique!==fx)return false;
-    if(q){const hay=(f.title+" "+(f.detail||"")+" "+(f.path||"")+" "+f.check+" "+(f.technique||"")).toLowerCase();if(!hay.includes(q))return false;}
+    if(q){const hay=(f.title+" "+(f.detail||"")+" "+(f.path||"")+" "+f.check+" "+(f.technique||"")+" "+((f.related||[]).join(" "))).toLowerCase();if(!hay.includes(q))return false;}
     return true;
   }).sort((a,b)=>SEV_ORDER[a.severity]-SEV_ORDER[b.severity] || a.tool.localeCompare(b.tool));
   $("#count").textContent = `${rows.length} of ${DATA.length}`;
   const tb=$("#rows"); tb.innerHTML="";
   if(!rows.length){tb.innerHTML=`<tr><td colspan="6"><div class="empty">No findings match the filters.</div></td></tr>`;return;}
   for(const f of rows){
-    const tr=el("tr");
+    const corr = f.check==="realtime.correlated";
+    const tr=el("tr", corr?"correlated":"");
+    const conf = f.confidence?` <span class="conf conf-${esc(f.confidence)}" title="correlation confidence">⬡ ${esc(f.confidence)}</span>`:"";
+    const lineage = (Array.isArray(f.related)&&f.related.length)
+      ? `<div class="lineage">${f.related.map(r=>`<div class="rl${/^lineage:/.test(r)?" chain":""}">${esc(r)}</div>`).join("")}</div>`
+      : "";
     tr.innerHTML =
       `<td>${sevPill(f.severity)}</td>`+
-      `<td><span class="mono">${f.tool}</span></td>`+
-      `<td><span class="mono" style="color:var(--muted)">${f.check}</span></td>`+
-      `<td class="title">${esc(f.title)}${f.detail?`<div class="det mono">${esc(f.detail)}</div>`:""}${f.sigma?` <span class="tag">σ ${f.sigma}</span>`:""}</td>`+
+      `<td><span class="mono">${esc(f.tool)}</span></td>`+
+      `<td><span class="mono" style="color:var(--muted)">${esc(f.check)}</span></td>`+
+      `<td class="title">${corr?`<span class="corrtag">⛓ correlated</span> `:""}${esc(f.title)}${conf}${f.detail?`<div class="det mono">${esc(f.detail)}</div>`:""}${f.sigma?` <span class="tag">σ ${esc(f.sigma)}</span>`:""}${lineage}</td>`+
       `<td class="path">${f.path?esc(f.path):"—"}</td>`+
-      `<td>${f.technique?`<span class="tag">${f.technique}</span>`:"—"}</td>`;
+      `<td>${f.technique?`<span class="tag">${esc(f.technique)}</span>`:"—"}</td>`;
     tb.appendChild(tr);
   }
 }
