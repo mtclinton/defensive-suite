@@ -1,0 +1,46 @@
+[Unit]
+Description=defensive-suite agentd — real-time Tetragon→collector pipeline (observe mode)
+Documentation=https://github.com/mtclinton/defensive-suite
+After=tetragon.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Optional: AGENT_COLLECTOR_URL / AGENT_COLLECTOR_AUTH (Bearer token) live here, 0600.
+EnvironmentFile=-/etc/agentd/agentd.env
+ExecStart=/usr/local/bin/agentd run
+Restart=on-failure
+RestartSec=3
+Nice=10
+
+# M1 is observe-only: agentd READS Tetragon's JSON export and POSTs to the local
+# collector — no enforcement, no privileged action. It runs as root only so it can
+# read the (root-owned) Tetragon export; all capabilities are dropped, since
+# read+HTTP need none. (The privileged response layer arrives in M3.)
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/log/tetragon
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap
+MemoryMax=128M
+TasksMax=32
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

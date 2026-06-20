@@ -1,0 +1,45 @@
+# defensive-suite — Tetragon TracingPolicy (OBSERVE mode, M1).
+#
+# Surfaces the events agentd's rules consume: eBPF program loads and writes to
+# the trust-path files. process_exec/exit are emitted by Tetragon by default, so
+# the staging-dir / fileless-exec rules need no policy here.
+#
+# This policy ONLY observes (no matchActions) — every match is reported, nothing
+# is blocked. Enforcement (M4) is a one-line change: add
+#   matchActions: [{ action: Sigkill }]   (or Override)
+# to a selector, and validate it in a VM first. Override additionally requires a
+# kernel built with CONFIG_BPF_KPROBE_OVERRIDE (check with `tetra probe`).
+#
+# Install (privileged — review first; do not auto-run):
+#   sudo tetra tracingpolicy add dsuite-observe.yaml
+#   # or, declaratively, drop it where your Tetragon daemon loads policies from.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: dsuite-observe
+spec:
+  kprobes:
+    # eBPF program load — the rootkit-load signal.
+    - call: "security_bpf_prog_load"
+      syscall: false
+      # no selectors/actions → every load is reported (agentd allowlists loaders).
+
+    # Writes to trust-path files (ld.so.preload / PAM / authorized_keys / sshd_config).
+    - call: "security_file_permission"
+      syscall: false
+      args:
+        - index: 0
+          type: "file"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Prefix"
+              values:
+                - "/etc/ld.so.preload"
+                - "/etc/pam.d/"
+                - "/root/.ssh/"
+                - "/lib/security/"
+                - "/lib64/security/"
+                - "/usr/lib64/security/"
+                - "/etc/ssh/sshd_config"
+          # no matchActions → OBSERVE only.

@@ -15,6 +15,12 @@ The [`collector/`](collector/) service is the aggregation keystone: every tool P
 live, local data — the "one local collector" the architecture is built around. A single
 static Go binary; bind it to a private/Tailscale interface.
 
+The [`agent/`](agent/) (`agentd`) is the Phase 1 **real-time** tier (see
+[`docs/PHASE1_DESIGN.md`](docs/PHASE1_DESIGN.md)): it tails [Tetragon](https://tetragon.io)'s
+event stream and forwards findings to the collector within seconds — turning the scheduled
+scans into continuous detection. Observe-only for now; enforcement/response are later
+milestones.
+
 A static, dependency-free build of that same dashboard lives in [`dashboard/`](dashboard/)
 and is published via GitHub Pages:
 **<https://mtclinton.github.io/defensive-suite/dashboard/>** — findings filterable by
