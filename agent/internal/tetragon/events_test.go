@@ -119,6 +119,41 @@ func TestParseConnectGracefulDegrade(t *testing.T) {
 	}
 }
 
+// security_socket_connect / __sys_connect carry the destination in a
+// sockaddr_arg (sa_addr / sa_port), not a sock_arg. The parser must fall back to
+// it so these hooks produce a real Dst/DstPort connect event.
+const connectSockaddrLine = `{"process_kprobe":{"process":{"pid":99,"binary":"/tmp/.x/beacon","exec_id":"bGFi:9:99"},"function_name":"security_socket_connect","args":[{"sockaddr_arg":{"sa_family":"AF_INET","sa_addr":"203.0.113.7","sa_port":4444}}]}}`
+
+func TestParseConnectSockaddrArg(t *testing.T) {
+	e, ok := ParseLine(connectSockaddrLine)
+	if !ok {
+		t.Fatal("security_socket_connect sockaddr line should parse")
+	}
+	if e.Kind != "connect" {
+		t.Fatalf("kind=%q (want connect): %+v", e.Kind, e)
+	}
+	if e.Dst != "203.0.113.7" || e.DstPort != 4444 {
+		t.Errorf("dst=%s:%d (want 203.0.113.7:4444) from sockaddr_arg: %+v", e.Dst, e.DstPort, e)
+	}
+	if e.Function != "security_socket_connect" || e.ExecID != "bGFi:9:99" {
+		t.Errorf("event=%+v", e)
+	}
+}
+
+// The ProtoJSON camelCase mirror (sockaddrArg) must resolve too, e.g. on a
+// __sys_connect hook.
+const connectSockaddrCamelLine = `{"processKprobe":{"process":{"pid":17,"binary":"/usr/bin/curl"},"functionName":"__sys_connect","args":[{"sockaddrArg":{"sa_addr":"198.51.100.9","sa_port":8443}}]}}`
+
+func TestParseConnectSockaddrArgCamel(t *testing.T) {
+	e, ok := ParseLine(connectSockaddrCamelLine)
+	if !ok {
+		t.Fatal("camelCase sockaddrArg connect line should parse")
+	}
+	if e.Kind != "connect" || e.Dst != "198.51.100.9" || e.DstPort != 8443 {
+		t.Errorf("event=%+v (want connect 198.51.100.9:8443)", e)
+	}
+}
+
 func TestParseKprobeBPF(t *testing.T) {
 	e, ok := ParseLine(bpfLoadLine)
 	if !ok || e.Kind != "kprobe" {

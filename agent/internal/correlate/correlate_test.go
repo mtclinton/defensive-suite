@@ -344,6 +344,155 @@ func TestConnectNoDestinationStillCorrelates(t *testing.T) {
 	}
 }
 
+// Fix 1+2: a loader looping security_bpf_prog_load under ONE exec_id must not
+// grow procState.suspicious without bound (dedup + cap), and correlation still
+// fires. Without the fix this slice grows one entry per load → OOM.
+func TestBPFLoadSuspicionBoundedAndStillCorrelates(t *testing.T) {
+	cl := newClock()
+	c := New(0, time.Hour, cl.now)
+	cfg := testCfg()
+
+	// Many identical realtime.bpf arming findings under one exec_id.
+	for i := 0; i < 10000; i++ {
+		c.Process(tetragon.Event{Kind: "kprobe", Function: "security_bpf_prog_load", Binary: "/usr/bin/evil", ExecID: "B", Pid: 70}, cfg)
+	}
+	st := c.byExec["B"]
+	if st == nil {
+		t.Fatal("process B should be tracked")
+	}
+	if len(st.suspicious) > maxSuspicionsPerProc {
+		t.Errorf("suspicious grew unbounded: len=%d > cap %d", len(st.suspicious), maxSuspicionsPerProc)
+	}
+	// Identical suspicions dedup to a single entry.
+	if len(st.suspicious) != 1 {
+		t.Errorf("identical suspicions should dedup to 1, got %d", len(st.suspicious))
+	}
+	// Correlation still fires on the subsequent connect.
+	got := c.Process(tetragon.Event{Kind: "connect", ExecID: "B", Pid: 70, Dst: "5.5.5.5", DstPort: 4444}, cfg)
+	f := correlated(t, got)
+	if f.Severity != report.SeverityCritical {
+		t.Errorf("looped bpf load → connect should still correlate Critical: %+v", f)
+	}
+}
+
+// Fix 3: a process that stays ACTIVE past firstSeen+TTL (lastSeen refreshed)
+// still correlates a later connect; a truly idle one is evicted.
+func TestActiveProcessStaysArmedPastFirstSeenTTL(t *testing.T) {
+	cl := newClock()
+	c := New(0, 100*time.Millisecond, cl.now)
+	cfg := testCfg()
+
+	c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.x/payload", ExecID: "X", Pid: 1337}, cfg)
+	// Keep the process active, advancing the clock past the original firstSeen+TTL
+	// window each step. lastSeen keeps refreshing, so it must stay armed.
+	for i := 0; i < 5; i++ {
+		cl.add(80 * time.Millisecond) // < TTL since last activity
+		c.Process(tetragon.Event{Kind: "kprobe", Function: "security_bpf_prog_load", Binary: "/usr/bin/x", ExecID: "X", Pid: 1337}, cfg)
+	}
+	// Total elapsed (400ms) is well past firstSeen+TTL (100ms) but the process
+	// never went idle longer than TTL, so a connect now must still correlate.
+	cl.add(80 * time.Millisecond)
+	got := c.Process(tetragon.Event{Kind: "connect", ExecID: "X", Pid: 1337, Dst: "1.2.3.4", DstPort: 443}, cfg)
+	if !hasCorrelated(got) {
+		t.Errorf("an active-then-beacon process should still correlate: %+v", got)
+	}
+
+	// A second process that goes idle > TTL is evicted and does not correlate.
+	c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.y/idle", ExecID: "Y", Pid: 2000}, cfg)
+	cl.add(200 * time.Millisecond) // idle past TTL
+	got = c.Process(tetragon.Event{Kind: "connect", ExecID: "Y", Pid: 2000, Dst: "9.9.9.9", DstPort: 80}, cfg)
+	if hasCorrelated(got) {
+		t.Errorf("an idle-past-TTL process must be evicted, not correlate: %+v", got)
+	}
+}
+
+// Fix 4: at the cap, eviction on a lastSeen tie is deterministic (by execID),
+// not dependent on Go map iteration order. Repeated runs must evict the same key.
+func TestCapEvictionDeterministicOnTie(t *testing.T) {
+	cl := newClock()
+	// Two procs admitted at the SAME lastSeen, then a third forces eviction.
+	run := func() string {
+		c := New(2, time.Hour, cl.now)
+		cfg := testCfg()
+		// A and B at identical now().
+		c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/a", ExecID: "A", Pid: 1}, cfg)
+		c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/b", ExecID: "B", Pid: 2}, cfg)
+		// Admitting C evicts the deterministic-oldest tie (A < B → evict A).
+		c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/c", ExecID: "C", Pid: 3}, cfg)
+		if _, ok := c.byExec["A"]; ok {
+			return "A"
+		}
+		if _, ok := c.byExec["B"]; ok {
+			return "B"
+		}
+		return "?"
+	}
+	first := run()
+	if first != "B" {
+		t.Errorf("tie-break should evict A (smallest execID), leaving B; got survivor %q", first)
+	}
+	for i := 0; i < 20; i++ {
+		if got := run(); got != first {
+			t.Fatalf("non-deterministic eviction: run %d survivor %q != %q", i, got, first)
+		}
+	}
+}
+
+// Fix 6: a beaconing implant connecting repeatedly to the SAME dst yields ONE
+// correlated finding; a connect to a NEW dst yields a second.
+func TestDuplicateBeaconSuppressedPerDst(t *testing.T) {
+	cl := newClock()
+	c := New(0, time.Hour, cl.now)
+	cfg := testCfg()
+
+	c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.x/payload", ExecID: "X", Pid: 1}, cfg)
+
+	beacon := tetragon.Event{Kind: "connect", ExecID: "X", Pid: 1, Dst: "1.2.3.4", DstPort: 443}
+	first := c.Process(beacon, cfg)
+	if !hasCorrelated(first) {
+		t.Fatalf("first beacon should correlate: %+v", first)
+	}
+	second := c.Process(beacon, cfg)
+	if hasCorrelated(second) {
+		t.Errorf("repeat beacon to the SAME dst must be suppressed: %+v", second)
+	}
+	// A connect to a NEW dst correlates again.
+	third := c.Process(tetragon.Event{Kind: "connect", ExecID: "X", Pid: 1, Dst: "5.6.7.8", DstPort: 8080}, cfg)
+	if !hasCorrelated(third) {
+		t.Errorf("a connect to a NEW dst should correlate: %+v", third)
+	}
+	// And that new dst is itself latched.
+	fourth := c.Process(tetragon.Event{Kind: "connect", ExecID: "X", Pid: 1, Dst: "5.6.7.8", DstPort: 8080}, cfg)
+	if hasCorrelated(fourth) {
+		t.Errorf("repeat to the new dst must also be suppressed: %+v", fourth)
+	}
+}
+
+// Fix 7: after a process exits, a later no-exec_id connect on that (not-yet-
+// reused) pid must NOT resolve to the dead suspicious process.
+func TestExitClearsPidIndexNoMisattribution(t *testing.T) {
+	cl := newClock()
+	c := New(0, time.Hour, cl.now)
+	cfg := testCfg()
+
+	const pid = 4242
+	c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.x/payload", ExecID: "X", Pid: pid}, cfg)
+	// Sanity: while alive, a pid-only connect WOULD correlate.
+	if _, ok := c.pidIndex[pid]; !ok {
+		t.Fatalf("pid %d should be indexed while alive", pid)
+	}
+	// The process exits.
+	c.Process(tetragon.Event{Kind: "exit", Binary: "/tmp/.x/payload", ExecID: "X", Pid: pid}, cfg)
+	if ex, ok := c.pidIndex[pid]; ok {
+		t.Errorf("exit must drop the pid-index entry, still maps to %q", ex)
+	}
+	// A later no-exec_id connect on that pid (before reuse) must NOT correlate.
+	got := c.Process(tetragon.Event{Kind: "connect", Pid: pid, Dst: "6.6.6.6", DstPort: 1337}, cfg)
+	if hasCorrelated(got) {
+		t.Errorf("no-exec_id connect after exit must not misattribute: %+v", got)
+	}
+}
+
 // Defaults are applied when zero values are passed to New.
 func TestNewDefaults(t *testing.T) {
 	c := New(0, 0, nil)

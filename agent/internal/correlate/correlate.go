@@ -42,6 +42,17 @@ const (
 	// maxLineageDepth bounds the parent-chain walk so a (malicious or buggy)
 	// cyclic/very-deep exec_id chain cannot loop or blow the stack.
 	maxLineageDepth = 16
+	// maxSuspicionsPerProc caps the per-process suspicion set. realtime.bpf
+	// (security_bpf_prog_load) fires repeatedly under ONE exec_id, so a loader
+	// looping eBPF loads would otherwise append one suspicion per load for the
+	// whole TTL → unbounded growth → OOM. Correlation only needs presence +
+	// suspicious[0] + the first exfilish entry, so a small cap (with dedup) loses
+	// zero fidelity.
+	maxSuspicionsPerProc = 16
+	// maxCorrelatedDsts caps the per-process set of already-correlated
+	// destinations used to suppress duplicate correlated findings from a beaconing
+	// implant. Bounded so it can't grow without limit under a fast beacon.
+	maxCorrelatedDsts = 64
 )
 
 // procState is the per-process correlation state for one exec_id.
@@ -50,10 +61,18 @@ type procState struct {
 	parentExecID string
 	binary       string
 	firstSeen    time.Time
+	// lastSeen is refreshed on every event for this exec_id. Eviction/TTL ages
+	// off lastSeen (not firstSeen) so a process that stays ACTIVE for >TTL and
+	// then beacons is still armed; firstSeen is kept for info/ordering.
+	lastSeen time.Time
 	// suspicious is the set of base findings on THIS process that arm an egress
-	// correlation (staging/fileless exec, bpf load). Kept small (a process emits
-	// few such findings); they carry the reason + technique used to escalate.
+	// correlation (staging/fileless exec, bpf load). Bounded + deduped (see
+	// maxSuspicionsPerProc): a looping bpf loader cannot grow it without bound.
 	suspicious []suspicion
+	// correlatedDsts is the bounded set of destinations already escalated for
+	// this process, used to suppress duplicate correlated findings from a
+	// beaconing implant (see maxCorrelatedDsts).
+	correlatedDsts map[string]bool
 }
 
 // suspicion records why a process is flagged, for the correlated finding's
@@ -62,6 +81,23 @@ type suspicion struct {
 	reason    string // human reason, e.g. "execution from a staging directory"
 	technique string // base technique, e.g. "T1059"
 	exfilish  bool   // base looks exfil-oriented → prefer T1041 over T1071
+}
+
+// addSuspicion records susp on the process, deduping equal suspicions and
+// capping the slice at maxSuspicionsPerProc. A repeating arming finding (e.g. a
+// loader looping security_bpf_prog_load under one exec_id) therefore cannot grow
+// the slice without bound. Correlation only needs presence + suspicious[0] + the
+// first exfilish entry, so dedup+cap loses zero fidelity.
+func (st *procState) addSuspicion(susp suspicion) {
+	for _, s := range st.suspicious {
+		if s == susp {
+			return // already recorded an equal suspicion
+		}
+	}
+	if len(st.suspicious) >= maxSuspicionsPerProc {
+		return // bounded: further distinct suspicions are dropped
+	}
+	st.suspicious = append(st.suspicious, susp)
 }
 
 // Correlator is the stateful, bounded correlation engine. It is NOT safe for
@@ -128,24 +164,37 @@ func (c *Correlator) Process(ev tetragon.Event, cfg rules.Config) []report.Findi
 // carry an exec_id) and maintains the pid→exec_id index.
 func (c *Correlator) track(ev tetragon.Event) {
 	if ev.ExecID == "" {
-		// No exec_id: we can still index by pid for exec/connect so the pid path
-		// works, but there's no stable key to store lineage under.
+		// No exec_id: there is no stable key, so the process can't be tracked or
+		// pid-indexed and correlation is skipped for this event. (Tetragon exec /
+		// kprobe events virtually always carry an exec_id, so this is rare.)
 		return
 	}
 	st := c.byExec[ev.ExecID]
+	now := c.now()
 	if st == nil {
 		c.admit()
 		st = &procState{
 			execID:    ev.ExecID,
-			firstSeen: c.now(),
+			firstSeen: now,
 		}
 		c.byExec[ev.ExecID] = st
 	}
+	st.lastSeen = now // age eviction/TTL off the most recent activity
 	if ev.ParentExecID != "" {
 		st.parentExecID = ev.ParentExecID
 	}
 	if ev.Binary != "" {
 		st.binary = ev.Binary
+	}
+	if ev.Kind == "exit" {
+		// On exit the pid no longer belongs to this process. Drop a pid-index
+		// entry that still points here so a later no-exec_id connect on that pid
+		// (before reuse) is NOT misattributed to this now-dead process. (Do this
+		// instead of re-indexing the pid below.)
+		if ev.Pid != 0 && c.pidIndex[ev.Pid] == ev.ExecID {
+			delete(c.pidIndex, ev.Pid)
+		}
+		return
 	}
 	if ev.Pid != 0 {
 		c.pidIndex[ev.Pid] = ev.ExecID
@@ -153,7 +202,9 @@ func (c *Correlator) track(ev tetragon.Event) {
 }
 
 // admit makes room for one new process if we are at the cap, evicting the
-// oldest-by-first-seen entry so the map stays bounded.
+// oldest-by-last-seen (least recently active) entry so the map stays bounded.
+// Ties on lastSeen are broken deterministically by execID (Go map iteration
+// order is non-deterministic), so eviction is reproducible.
 func (c *Correlator) admit() {
 	if len(c.byExec) < c.maxProcs {
 		return
@@ -161,21 +212,30 @@ func (c *Correlator) admit() {
 	var oldestKey string
 	var oldest time.Time
 	for k, st := range c.byExec {
-		if oldestKey == "" || st.firstSeen.Before(oldest) {
-			oldestKey, oldest = k, st.firstSeen
+		switch {
+		case oldestKey == "":
+		case st.lastSeen.Before(oldest):
+		case st.lastSeen.Equal(oldest) && k < oldestKey:
+			// deterministic tie-break
+		default:
+			continue
 		}
+		oldestKey, oldest = k, st.lastSeen
 	}
 	if oldestKey != "" {
 		c.forget(oldestKey)
 	}
 }
 
-// evictExpired drops every process whose state has aged past the TTL, and prunes
-// any pid-index entries that pointed at them.
+// evictExpired drops every process idle past the TTL (aged off lastSeen, not
+// firstSeen, so an actively-emitting process stays armed), and prunes any
+// pid-index entries that pointed at them. Residual limit: a process that is
+// SILENT between its suspicious exec and a beacon arriving >TTL later is still
+// evicted before the beacon and won't correlate — inherent to a bounded window.
 func (c *Correlator) evictExpired() {
 	cutoff := c.now().Add(-c.ttl)
 	for k, st := range c.byExec {
-		if st.firstSeen.Before(cutoff) {
+		if st.lastSeen.Before(cutoff) {
 			c.forget(k)
 		}
 	}
@@ -200,7 +260,7 @@ func (c *Correlator) annotateAndArm(ev tetragon.Event, base []report.Finding) []
 	for i := range base {
 		f := &base[i]
 		if susp, ok := suspicionFor(*f); ok && st != nil {
-			st.suspicious = append(st.suspicious, susp)
+			st.addSuspicion(susp)
 		}
 		// Lineage: attach the ancestry to every base finding. If an ancestor was
 		// itself flagged suspicious, escalate confidence.
@@ -233,8 +293,10 @@ func (c *Correlator) correlateEgress(ev tetragon.Event) (report.Finding, bool) {
 	if st == nil || len(st.suspicious) == 0 {
 		return report.Finding{}, false
 	}
-	// TTL guard: a connect long after the suspicious exec does not correlate.
-	if st.firstSeen.Before(c.now().Add(-c.ttl)) {
+	// TTL guard: a connect from a process idle past the TTL does not correlate.
+	// Aged off lastSeen (refreshed on every event) so an actively-emitting
+	// suspicious process stays armed for a late beacon.
+	if st.lastSeen.Before(c.now().Add(-c.ttl)) {
 		return report.Finding{}, false
 	}
 
@@ -260,6 +322,20 @@ func (c *Correlator) correlateEgress(ev tetragon.Event) (report.Finding, bool) {
 	}
 	if dst == "" {
 		dst = "an external endpoint"
+	}
+
+	// Latch per (exec_id, dst): a beaconing implant reconnects to the same dst
+	// repeatedly; emit the correlated finding once per distinct dst and suppress
+	// identical re-emits so the collector isn't flooded with duplicates. A NEW
+	// dst still correlates. The set is bounded by maxCorrelatedDsts.
+	if st.correlatedDsts[dst] {
+		return report.Finding{}, false
+	}
+	if st.correlatedDsts == nil {
+		st.correlatedDsts = make(map[string]bool)
+	}
+	if len(st.correlatedDsts) < maxCorrelatedDsts {
+		st.correlatedDsts[dst] = true
 	}
 
 	binary := st.binary

@@ -83,6 +83,22 @@ func (s sockArg) dst() (ip string, port uint32) {
 	return ip, port
 }
 
+// sockaddrArg is Tetragon's KprobeSockaddr argument (declared `type: "sockaddr"`
+// in a TracingPolicy). The socket-syscall egress hooks (security_socket_connect
+// / __sys_connect) carry the destination here — NOT in a sock_arg — as the
+// connect() target address (sa_addr / sa_port). Best-effort: a missing/zero
+// field just yields no destination.
+type sockaddrArg struct {
+	SaAddr string `json:"sa_addr"`
+	SaPort uint32 `json:"sa_port"`
+	Family string `json:"sa_family"`
+}
+
+// dst resolves the destination ip/port from the sockaddr fields.
+func (s sockaddrArg) dst() (ip string, port uint32) {
+	return s.SaAddr, s.SaPort
+}
+
 type kprobeArg struct {
 	FileArg   *pathArg `json:"file_arg"`
 	PathArg   *pathArg `json:"path_arg"`
@@ -91,6 +107,12 @@ type kprobeArg struct {
 	SockArg   *sockArg `json:"sock_arg"`
 	// camelCase mirror of sock_arg for the ProtoJSON export shape.
 	SockArgCamel *sockArg `json:"sockArg"`
+	// SockaddrArg carries the connect() target for the socket-syscall egress
+	// hooks (security_socket_connect / __sys_connect), which export the
+	// destination in a sockaddr rather than a sock. SockaddrArgCamel mirrors it
+	// for the ProtoJSON export shape.
+	SockaddrArg      *sockaddrArg `json:"sockaddr_arg"`
+	SockaddrArgCamel *sockaddrArg `json:"sockaddrArg"`
 }
 
 // sock returns the parsed socket argument under either field-name shape.
@@ -99,6 +121,14 @@ func (a kprobeArg) sock() *sockArg {
 		return a.SockArg
 	}
 	return a.SockArgCamel
+}
+
+// sockaddr returns the parsed sockaddr argument under either field-name shape.
+func (a kprobeArg) sockaddr() *sockaddrArg {
+	if a.SockaddrArg != nil {
+		return a.SockaddrArg
+	}
+	return a.SockaddrArgCamel
 }
 
 type kprobeEvent struct {
@@ -275,9 +305,21 @@ func normalize(r rawEvent) (Event, bool) {
 			case a.IntArg != nil:
 				e.Ints = append(e.Ints, *a.IntArg)
 			case a.sock() != nil:
-				// Best-effort destination extraction: an unknown sock shape leaves
-				// Dst/DstPort empty rather than failing the parse.
+				// Primary: tcp_connect exports the destination in a sock_arg. An
+				// unknown sock shape leaves Dst/DstPort empty rather than failing.
 				if ip, port := a.sock().dst(); ip != "" || port != 0 {
+					if e.Dst == "" {
+						e.Dst = ip
+					}
+					if e.DstPort == 0 {
+						e.DstPort = int(port)
+					}
+				}
+			case a.sockaddr() != nil:
+				// Fallback: the socket-syscall egress hooks
+				// (security_socket_connect / __sys_connect) carry the destination
+				// in a sockaddr_arg instead of a sock_arg.
+				if ip, port := a.sockaddr().dst(); ip != "" || port != 0 {
 					if e.Dst == "" {
 						e.Dst = ip
 					}
