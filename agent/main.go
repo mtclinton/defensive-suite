@@ -24,6 +24,7 @@ import (
 	"github.com/mtclinton/defensive-suite/agent/internal/preflight"
 	"github.com/mtclinton/defensive-suite/agent/internal/report"
 	"github.com/mtclinton/defensive-suite/agent/internal/respond"
+	"github.com/mtclinton/defensive-suite/agent/internal/spool"
 )
 
 var version = "0.1.0"
@@ -206,12 +207,43 @@ func cmdRun(args []string) int {
 	}
 
 	buf := pipeline.NewBuffer(cfg.BufferMax)
+	// The HTTP client timeout (15s) is deliberately BELOW the collector's 20s
+	// WriteTimeout so a slow-but-alive collector isn't misread as a failed POST
+	// (which would needlessly spool a report that actually got through).
 	client := &http.Client{Timeout: 15 * time.Second}
-	// run mode emits an event STREAM: each flush posts only the findings drained
-	// since the last flush, as an Append delta. The collector accumulates these,
-	// so deltas the bounded buffer would later trim are not lost. If the cap was
-	// hit within a window, some findings were trimmed before this flush — warn
-	// (loudly, not silently) so the operator can raise AGENT buffer/flush rate.
+
+	// Delivery spool: a failed POST persists the report under <state-dir>/spool/
+	// instead of dropping it, and every flush replays the backlog oldest-first. A
+	// nil spool (open failed) degrades to the old log-and-drop behaviour rather
+	// than killing detection.
+	var sp *spool.Spool
+	spoolDir := filepath.Join(cfg.StateDir, "spool")
+	if s, err := spool.New(spoolDir, 0, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "<3>agentd: delivery spool NOT available: %v (failed POSTs will be dropped)\n", err)
+	} else {
+		sp = s
+	}
+
+	// postReport delivers one report to the collector with the spool-friendly POST
+	// signature. A blank CollectorURL is treated as success (forwarding disabled —
+	// nothing to spool/replay).
+	postReport := func(data []byte) error {
+		if cfg.CollectorURL == "" {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		return report.EmitWebhookBytes(ctx, client, cfg.CollectorURL, cfg.CollectorAuth, data)
+	}
+
+	// run mode emits an event STREAM: each flush posts the findings drained since
+	// the last flush, as an Append delta. The collector accumulates these, so
+	// deltas the bounded buffer would later trim are not lost. agentd ALSO posts a
+	// HEARTBEAT every flush even with zero new findings (an empty Append report) so
+	// the collector's last-seen advances and a crash-looping/dead agent becomes
+	// visible — a quiet healthy agent must not look the same as a dead one. If the
+	// cap was hit within a window, some findings were trimmed before this flush —
+	// warn (loudly, not silently) so the operator can raise the buffer/flush rate.
 	flush := func() {
 		if dropped := buf.Dropped(); dropped > 0 {
 			fmt.Fprintf(os.Stderr,
@@ -219,18 +251,39 @@ func cmdRun(args []string) int {
 				4, dropped, cfg.BufferMax)
 		}
 		pending := buf.Drain()
-		if len(pending) == 0 {
+		rep := report.New("agent", cfg.Host, "", time.Now(), pending)
+		rep.Append = true // always a delta; empty == heartbeat (no-op for findings)
+		if len(pending) > 0 {
+			_ = report.EmitJournal(os.Stderr, rep)
+		}
+		if cfg.CollectorURL == "" {
 			return
 		}
-		rep := report.New("agent", cfg.Host, "", time.Now(), pending)
-		rep.Append = true
-		_ = report.EmitJournal(os.Stderr, rep)
-		if cfg.CollectorURL != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			if err := report.EmitWebhook(ctx, client, cfg.CollectorURL, cfg.CollectorAuth, rep); err != nil {
-				fmt.Fprintln(os.Stderr, "agentd: collector:", err)
+		// Replay any spooled backlog FIRST (oldest-first) so order is preserved: a
+		// report spooled during an outage must reach the collector before this
+		// fresh one. If replay fails the collector is still down — spool this report
+		// too rather than attempting (and failing) a live POST.
+		data, err := spool.MarshalReport(rep)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "agentd: marshal report:", err)
+			return
+		}
+		if sp != nil {
+			if _, rerr := sp.Replay(postReport); rerr != nil {
+				fmt.Fprintln(os.Stderr, "agentd: collector (replay):", rerr)
+				if werr := sp.Write(data); werr != nil {
+					fmt.Fprintln(os.Stderr, "agentd: spool write:", werr)
+				}
+				return
 			}
-			cancel()
+		}
+		if err := postReport(data); err != nil {
+			fmt.Fprintln(os.Stderr, "agentd: collector:", err)
+			if sp != nil {
+				if werr := sp.Write(data); werr != nil {
+					fmt.Fprintln(os.Stderr, "agentd: spool write:", werr)
+				}
+			}
 		}
 	}
 
@@ -259,9 +312,14 @@ func cmdRun(args []string) int {
 		}
 	}
 
+	// Checkpoint the tail position under the state dir so a crash/restart resumes
+	// where it left off (catch up on events written during downtime) instead of
+	// jumping to EOF and skipping them — closing the blind window an attacker who
+	// can OOM/crash agentd would otherwise get for free.
+	statePath := filepath.Join(cfg.StateDir, "tail.state")
 	fmt.Fprintf(os.Stderr, "agentd %s: tailing %s → %s (observe mode)\n",
 		version, cfg.TetragonLog, orNone(cfg.CollectorURL))
-	_ = pipeline.Tail(ctx, cfg.TetragonLog, time.Second, func(line string) {
+	_ = pipeline.TailWithState(ctx, cfg.TetragonLog, statePath, time.Second, func(line string) {
 		buf.Add(pipeline.EvalLine(line, cfg)...)
 	})
 	flush()

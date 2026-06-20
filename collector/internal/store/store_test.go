@@ -144,3 +144,134 @@ func TestNonAppendReplacesThenAppendsAccumulate(t *testing.T) {
 		t.Fatalf("append after full should accumulate onto baseline, got %d: %+v", len(f), f)
 	}
 }
+
+// toolByName finds a ToolStatus in a Summary by tool name.
+func toolByName(sum Summary, tool string) (ToolStatus, bool) {
+	for _, ts := range sum.Tools {
+		if ts.Tool == tool {
+			return ts, true
+		}
+	}
+	return ToolStatus{}, false
+}
+
+// Summary computes a per-tool last_seen + stale using the injected clock: a
+// recently-received tool is NOT stale; one whose last receive is older than the
+// threshold IS stale, with the right age.
+func TestSummaryLastSeenAndStale(t *testing.T) {
+	s, _ := New(t.TempDir(), 0, 0)
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	s.staleAfter = 90 * time.Second
+
+	// Fresh: received 10s ago → not stale.
+	s.AddReport(Report{Tool: "agent", Host: "h", Received: now.Add(-10 * time.Second),
+		Findings: []Finding{{Severity: "info"}}})
+	// Stale: received 5m ago → stale.
+	s.AddReport(Report{Tool: "stale-tool", Host: "h", Received: now.Add(-5 * time.Minute),
+		Findings: []Finding{{Severity: "info"}}})
+
+	sum := s.Summary()
+
+	fresh, ok := toolByName(sum, "agent")
+	if !ok {
+		t.Fatal("agent tool missing from summary")
+	}
+	if fresh.Stale {
+		t.Errorf("agent received 10s ago should NOT be stale: %+v", fresh)
+	}
+	if fresh.AgeSeconds != 10 {
+		t.Errorf("agent age = %ds, want 10", fresh.AgeSeconds)
+	}
+	if !fresh.LastSeen.Equal(now.Add(-10 * time.Second)) {
+		t.Errorf("agent last_seen = %v, want %v", fresh.LastSeen, now.Add(-10*time.Second))
+	}
+
+	stale, ok := toolByName(sum, "stale-tool")
+	if !ok {
+		t.Fatal("stale-tool missing from summary")
+	}
+	if !stale.Stale {
+		t.Errorf("stale-tool received 5m ago should be stale: %+v", stale)
+	}
+	if stale.AgeSeconds != 300 {
+		t.Errorf("stale-tool age = %ds, want 300", stale.AgeSeconds)
+	}
+}
+
+// An empty heartbeat (Append report with zero findings) advances last_seen and
+// keeps the tool fresh, while NOT adding to the finding set — distinguishing a
+// quiet healthy agent from a dead one.
+func TestSummaryHeartbeatKeepsFresh(t *testing.T) {
+	s, _ := New(t.TempDir(), 0, 0)
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	s.staleAfter = 90 * time.Second
+
+	// An older append with one finding, then a recent EMPTY heartbeat.
+	s.AddReport(Report{Tool: "agent", Host: "h", Received: now.Add(-5 * time.Minute), Append: true,
+		Findings: []Finding{{Severity: "high", Title: "real finding"}}})
+	s.AddReport(Report{Tool: "agent", Host: "h", Received: now.Add(-5 * time.Second), Append: true,
+		Findings: []Finding{}}) // heartbeat: no new findings
+
+	sum := s.Summary()
+	ts, ok := toolByName(sum, "agent")
+	if !ok {
+		t.Fatal("agent missing")
+	}
+	if ts.Stale {
+		t.Errorf("heartbeat 5s ago should keep the agent fresh: %+v", ts)
+	}
+	if ts.AgeSeconds != 5 {
+		t.Errorf("age should reflect the heartbeat (5s), got %d", ts.AgeSeconds)
+	}
+	// The finding set is unchanged by the empty heartbeat.
+	if ts.Count != 1 || sum.Findings != 1 {
+		t.Errorf("empty heartbeat must not change the finding set: count=%d findings=%d", ts.Count, sum.Findings)
+	}
+}
+
+// Empty heartbeats must COALESCE: posting many must not grow the report history
+// (otherwise they flood /api/reports and evict real reports under maxReports) —
+// at most one heartbeat per source is retained while liveness still advances.
+func TestHeartbeatsCoalesceNoChurn(t *testing.T) {
+	s, _ := New(t.TempDir(), 0, 5000)
+	base := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	s.AddReport(Report{Tool: "agent", Host: "h", Received: base, Append: true,
+		Findings: []Finding{{Severity: "high", Title: "real"}}})
+	before := len(s.Recent(100000))
+	for i := 1; i <= 200; i++ {
+		s.AddReport(Report{Tool: "agent", Host: "h", Received: base.Add(time.Duration(i) * time.Second), Append: true})
+	}
+	if grew := len(s.Recent(100000)) - before; grew > 1 {
+		t.Errorf("200 heartbeats must coalesce: history grew by %d (want <=1)", grew)
+	}
+	if f := s.LatestFindings(Filter{}); len(f) != 1 || f[0].Title != "real" {
+		t.Errorf("real finding lost to heartbeat churn: %+v", f)
+	}
+	// Liveness still advanced to the most recent heartbeat (base+200s).
+	s.now = func() time.Time { return base.Add(205 * time.Second) }
+	s.staleAfter = 90 * time.Second
+	if ts, ok := toolByName(s.Summary(), "agent"); !ok || ts.Stale {
+		t.Errorf("liveness should advance via the coalesced heartbeat: %+v", ts)
+	}
+}
+
+// A tool with no recorded receive time is treated as stale (no evidence of life)
+// with a sentinel age of -1.
+func TestSummaryNeverSeenIsStale(t *testing.T) {
+	s, _ := New(t.TempDir(), 0, 0)
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	// Report with a Time but a ZERO Received (never stamped) — drive current()'s
+	// received tracker to stay zero.
+	s.reports = append(s.reports, Report{Tool: "ghost", Host: "h", Time: now, Findings: []Finding{{Severity: "info"}}})
+	sum := s.Summary()
+	ts, ok := toolByName(sum, "ghost")
+	if !ok {
+		t.Fatal("ghost missing")
+	}
+	if !ts.Stale || ts.AgeSeconds != -1 {
+		t.Errorf("never-seen tool should be stale with age -1: %+v", ts)
+	}
+}

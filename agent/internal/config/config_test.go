@@ -13,6 +13,9 @@ func TestDefaults(t *testing.T) {
 	if len(d.StagingDirs) == 0 || len(d.SensitivePaths) == 0 || len(d.BPFLoadFuncs) == 0 || len(d.WriteFuncs) == 0 {
 		t.Error("default rule inputs should be populated")
 	}
+	if d.StateDir != "/var/lib/agentd" {
+		t.Errorf("StateDir default should be /var/lib/agentd, got %q", d.StateDir)
+	}
 }
 
 func TestLoadEnvOverlay(t *testing.T) {
@@ -23,10 +26,14 @@ func TestLoadEnvOverlay(t *testing.T) {
 		"AGENT_HOST":           "lab-01",
 		"AGENT_BPF_ALLOWLIST":  "/usr/bin/cilium-agent, /opt/tetragon/ ,,",
 		"AGENT_FLUSH_SECONDS":  "5",
+		"AGENT_STATE_DIR":      "/srv/agentd-state",
 	}
 	c := Load(func(k string) string { return env[k] })
 	if c.TetragonLog != "/var/log/t.json" || c.CollectorURL != "http://127.0.0.1:8787/ingest" {
 		t.Errorf("config=%+v", c)
+	}
+	if c.StateDir != "/srv/agentd-state" {
+		t.Errorf("StateDir override=%q", c.StateDir)
 	}
 	if c.CollectorAuth != "Bearer xyz" || c.Host != "lab-01" {
 		t.Errorf("config=%+v", c)

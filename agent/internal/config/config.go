@@ -25,6 +25,10 @@ type Config struct {
 	FlushInterval time.Duration
 	// BufferMax caps the rolling finding set (current real-time posture).
 	BufferMax int
+	// StateDir is agentd's persistent state directory. The tail checkpoint lives
+	// at <dir>/tail.state and the delivery spool at <dir>/spool/. Created at
+	// runtime; defaults to /var/lib/agentd. AGENT_STATE_DIR overrides it.
+	StateDir string
 
 	// StagingDirs: an exec whose binary is under one of these is suspicious.
 	StagingDirs []string
@@ -69,6 +73,7 @@ func Defaults() Config {
 		Host:          host,
 		FlushInterval: 10 * time.Second,
 		BufferMax:     5000,
+		StateDir:      "/var/lib/agentd",
 		StagingDirs:   []string{"/tmp/", "/dev/shm/", "/var/tmp/"},
 		SensitivePaths: []string{
 			// --- high-fidelity trust paths (rule emits Critical) ---
@@ -147,6 +152,9 @@ func Load(getenv func(string) string) Config {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.FlushInterval = time.Duration(n) * time.Second
 		}
+	}
+	if v := getenv("AGENT_STATE_DIR"); v != "" {
+		c.StateDir = v
 	}
 	// --- M3 response env ---
 	if v := getenv("AGENT_RESPONSE_SOCKET"); v != "" {

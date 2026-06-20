@@ -6,8 +6,10 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -128,20 +130,97 @@ func fileIno(fi os.FileInfo) uint64 {
 	return 0
 }
 
-// Tail follows a growing file, calling fn for each complete line. It starts at
-// the current end (only new events), retains partial lines across reads (bounded
-// by maxLeftover), reads at most maxReadPerPoll bytes per tick, and handles
-// rotation — both a size shrink (truncate) AND a rename+recreate detected via an
-// inode change (which a size-only check misses when the new file already grew
-// past the old offset). A not-yet-present file is waited for. Returns when ctx
-// is done.
+// checkpoint is the persisted tail position: the file's inode plus the byte
+// offset consumed so far. Persisting it lets Tail RESUME after a crash/restart
+// (the unit has Restart=on-failure) instead of jumping to EOF and skipping every
+// event written during downtime — a free blind window for an attacker who can
+// OOM/crash agentd. The inode guards the offset: it is only safe to seek into the
+// SAME file, so a mismatch (rotation) discards the stale offset and starts fresh.
+type checkpoint struct {
+	Inode  uint64 `json:"inode"`
+	Offset int64  `json:"offset"`
+}
+
+// loadCheckpoint reads the checkpoint from path. A missing or corrupt file
+// returns ok=false (caller falls back to EOF); persistence must never be able to
+// crash the detector, so any error is treated as "no checkpoint".
+func loadCheckpoint(path string) (checkpoint, bool) {
+	if path == "" {
+		return checkpoint{}, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return checkpoint{}, false
+	}
+	var c checkpoint
+	if json.Unmarshal(data, &c) != nil {
+		return checkpoint{}, false
+	}
+	return c, true
+}
+
+// saveCheckpoint atomically persists the checkpoint to path (write-temp+rename so
+// a crash mid-write can't leave a torn file). Errors are swallowed: a failure to
+// checkpoint must never disrupt tailing — the worst case degrades to today's
+// start-at-EOF behaviour on the next restart.
+func saveCheckpoint(path string, c checkpoint) {
+	if path == "" {
+		return
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		_ = os.MkdirAll(dir, 0o700)
+	}
+	data, err := json.Marshal(c)
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, data, 0o600) == nil {
+		_ = os.Rename(tmp, path)
+	}
+}
+
+// Tail follows a growing file with no persistence (starts at EOF every launch).
+// It is the simple form used by tests and any caller that does not need restart
+// durability; agentd's `run` mode uses TailWithState to survive restarts.
 func Tail(ctx context.Context, path string, poll time.Duration, fn func(string)) error {
+	return TailWithState(ctx, path, "", poll, fn)
+}
+
+// TailWithState follows a growing file, calling fn for each complete line, and
+// persists a {inode, offset} checkpoint to statePath so a crash/restart resumes
+// where it left off instead of skipping events written during downtime. statePath
+// "" disables persistence (equivalent to Tail). On start, if the checkpoint's
+// inode matches the CURRENT file's inode it RESUMES from the saved offset (catch
+// up on what was written while down); otherwise (no checkpoint = first run, or
+// inode mismatch = rotation into a different file we cannot safely seek) it starts
+// at EOF as before. The checkpoint is persisted after every read batch and on
+// rotation. It retains partial lines across reads (bounded by maxLeftover), reads
+// at most maxReadPerPoll bytes per tick, and handles rotation — both a size shrink
+// (truncate) AND a rename+recreate detected via an inode change (which a size-only
+// check misses when the new file already grew past the old offset). A not-yet-
+// present file is waited for. Returns when ctx is done.
+func TailWithState(ctx context.Context, path, statePath string, poll time.Duration, fn func(string)) error {
 	var offset int64
 	var ino uint64
 	var leftover []byte
 	if st, err := os.Stat(path); err == nil {
 		offset = st.Size()
 		ino = fileIno(st)
+		// Resume only when the checkpoint's inode matches the current file: the
+		// saved offset is a position WITHIN that specific file. On a match, rewind
+		// to the saved offset (which is <= current size unless the file shrank);
+		// catch-up reads then replay everything written during downtime. A clamp
+		// guards a checkpoint offset beyond the current size (e.g. truncation while
+		// down) — never seek past EOF.
+		if cp, ok := loadCheckpoint(statePath); ok && ino != 0 && cp.Inode == ino {
+			if cp.Offset >= 0 && cp.Offset <= st.Size() {
+				offset = cp.Offset
+			}
+		}
+		// Persist the resolved starting position so the inode is recorded even if no
+		// new data arrives before the next restart.
+		saveCheckpoint(statePath, checkpoint{Inode: ino, Offset: offset})
 	}
 	t := time.NewTicker(poll)
 	defer t.Stop()
@@ -158,6 +237,8 @@ func Tail(ctx context.Context, path string, poll time.Duration, fn func(string))
 			rotated := st.Size() < offset || (curIno != 0 && ino != 0 && curIno != ino)
 			if rotated {
 				offset, leftover = 0, nil // truncated, or rename+recreate
+				ino = curIno
+				saveCheckpoint(statePath, checkpoint{Inode: ino, Offset: offset})
 			}
 			ino = curIno
 			if st.Size() == offset {
@@ -189,6 +270,9 @@ func Tail(ctx context.Context, path string, poll time.Duration, fn func(string))
 				buf = nil
 			}
 			leftover = append([]byte(nil), buf...)
+			// Persist after each read batch: the offset just advanced, so a restart
+			// now resumes here rather than re-reading or skipping.
+			saveCheckpoint(statePath, checkpoint{Inode: ino, Offset: offset})
 		}
 	}
 }

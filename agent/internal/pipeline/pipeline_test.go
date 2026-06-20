@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -228,5 +229,244 @@ func TestTailCapsLeftover(t *testing.T) {
 		case <-deadline:
 			t.Fatal("did not recover with a clean line after dropping the oversized partial")
 		}
+	}
+}
+
+// readCheckpoint is a test helper that decodes the on-disk checkpoint.
+func readCheckpoint(t *testing.T, path string) checkpoint {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	var c checkpoint
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatalf("unmarshal checkpoint: %v", err)
+	}
+	return c
+}
+
+// inodeOf returns a file's inode via the same helper Tail uses.
+func inodeOf(t *testing.T, path string) uint64 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	return fileIno(fi)
+}
+
+// waitFor polls cond until it is true or the deadline elapses.
+func waitFor(t *testing.T, cond func() bool) bool {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// startTail runs TailWithState in a goroutine and returns the line channel plus a
+// stop func that cancels AND WAITS for the goroutine to exit. Waiting matters for
+// the checkpoint tests: TailWithState keeps writing tail.state(.tmp) into the
+// temp dir, which races t.TempDir()'s RemoveAll cleanup if the goroutine outlives
+// the test. The stop func is registered with t.Cleanup so every test drains it.
+func startTail(t *testing.T, path, statePath string) chan string {
+	t.Helper()
+	got := make(chan string, 64)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = TailWithState(ctx, path, statePath, 10*time.Millisecond, func(l string) {
+			select {
+			case got <- l:
+			default: // never block the tailer if the test stops reading
+			}
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done // ensure no more checkpoint writes before TempDir cleanup
+	})
+	return got
+}
+
+// TailWithState persists a checkpoint as the offset advances: after consuming a
+// line, the state file records the file's inode and the byte offset.
+func TestTailCheckpointWritten(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "t.log")
+	state := filepath.Join(dir, "tail.state")
+	if err := os.WriteFile(p, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := startTail(t, p, state)
+	time.Sleep(150 * time.Millisecond) // let Tail capture the initial offset
+
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	_, _ = f.WriteString("event one\n")
+	_ = f.Close()
+	<-got
+
+	if !waitFor(t, func() bool {
+		c, ok := loadCheckpoint(state)
+		return ok && c.Offset == int64(len("event one\n"))
+	}) {
+		t.Fatalf("checkpoint not advanced to the consumed offset: %+v", readCheckpoint(t, state))
+	}
+	if c := readCheckpoint(t, state); c.Inode != inodeOf(t, p) {
+		t.Errorf("checkpoint inode %d != file inode %d", c.Inode, inodeOf(t, p))
+	}
+}
+
+// On an inode MATCH, a fresh Tail RESUMES from the saved offset and catches up on
+// events appended "during downtime" (between the first Tail stopping and the
+// second starting), rather than jumping to EOF and skipping them.
+func TestTailResumesOnInodeMatch(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "t.log")
+	state := filepath.Join(dir, "tail.state")
+	if err := os.WriteFile(p, []byte("before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a checkpoint at the end of "before\n" with the CURRENT inode, simulating
+	// a prior run that had consumed up to there.
+	saveCheckpoint(state, checkpoint{Inode: inodeOf(t, p), Offset: int64(len("before\n"))})
+
+	// Append the "downtime" events AFTER the checkpoint but BEFORE this Tail starts.
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	_, _ = f.WriteString("during downtime A\nduring downtime B\n")
+	_ = f.Close()
+
+	got := startTail(t, p, state)
+
+	want := map[string]bool{"during downtime A": true, "during downtime B": true}
+	for i := 0; i < 2; i++ {
+		select {
+		case l := <-got:
+			if !want[l] {
+				t.Errorf("unexpected line %q (resumed from wrong offset?)", l)
+			}
+			if l == "before" {
+				t.Error("resume should NOT re-read events before the checkpoint")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("resume did not deliver the downtime events")
+		}
+	}
+}
+
+// On an inode MISMATCH (rotation into a different file), the stale offset is
+// IGNORED and Tail starts at EOF — seeking the saved offset into a different file
+// would read the wrong bytes. Only genuinely new appends are delivered.
+func TestTailIgnoresStaleOffsetOnInodeMismatch(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "t.log")
+	state := filepath.Join(dir, "tail.state")
+	if err := os.WriteFile(p, []byte("fresh file contents already here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Checkpoint references a DIFFERENT inode than the current file — a rotation.
+	saveCheckpoint(state, checkpoint{Inode: inodeOf(t, p) + 999999, Offset: 5})
+
+	got := startTail(t, p, state)
+	time.Sleep(150 * time.Millisecond) // start-at-EOF means the pre-existing line is NOT replayed
+
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	_, _ = f.WriteString("brand new line\n")
+	_ = f.Close()
+
+	select {
+	case l := <-got:
+		if l != "brand new line" {
+			t.Errorf("inode mismatch should start at EOF; got pre-existing/garbage line %q", l)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("did not deliver the new line after starting at EOF")
+	}
+	// The resolved checkpoint should now record the CURRENT inode, not the stale one.
+	if c := readCheckpoint(t, state); c.Inode != inodeOf(t, p) {
+		t.Errorf("checkpoint should be re-keyed to the current inode: %+v", c)
+	}
+}
+
+// A missing or corrupt state file must be tolerated gracefully: Tail falls back
+// to EOF and never crashes. (Equivalent to first-run behaviour.)
+func TestTailToleratesMissingAndCorruptState(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "t.log")
+	if err := os.WriteFile(p, []byte("preexisting\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt state file (not valid JSON) → loadCheckpoint returns ok=false.
+	corrupt := filepath.Join(dir, "corrupt.state")
+	if err := os.WriteFile(corrupt, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loadCheckpoint(corrupt); ok {
+		t.Error("corrupt state should not be treated as a valid checkpoint")
+	}
+	// Missing state file → ok=false.
+	if _, ok := loadCheckpoint(filepath.Join(dir, "does-not-exist.state")); ok {
+		t.Error("missing state should not be treated as a valid checkpoint")
+	}
+
+	// Use the corrupt state file: Tail must fall back to EOF, not crash.
+	got := startTail(t, p, corrupt)
+	time.Sleep(150 * time.Millisecond) // let Tail capture the initial EOF offset
+
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	_, _ = f.WriteString("after corrupt state\n")
+	_ = f.Close()
+	for {
+		select {
+		case l := <-got:
+			// EOF start means "preexisting" is NOT replayed; only the new line.
+			if l == "after corrupt state" {
+				return
+			}
+			t.Errorf("should start at EOF after corrupt state; got %q", l)
+		case <-time.After(3 * time.Second):
+			t.Fatal("Tail stalled / crashed on a corrupt state file")
+		}
+	}
+}
+
+// Rotation (rename+recreate → new inode) must UPDATE the checkpoint to the new
+// file's inode with the offset reset, so a later restart resumes the new file,
+// not the rotated-away one.
+func TestTailRotationUpdatesCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "t.log")
+	state := filepath.Join(dir, "tail.state")
+	if err := os.WriteFile(p, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldIno := inodeOf(t, p)
+
+	got := startTail(t, p, state)
+	time.Sleep(150 * time.Millisecond)
+
+	// Rotate: rename old aside, create a fresh file (new inode).
+	if err := os.Rename(p, p+".1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("rotated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newIno := inodeOf(t, p)
+	<-got // "rotated"
+
+	if !waitFor(t, func() bool {
+		c, ok := loadCheckpoint(state)
+		return ok && c.Inode == newIno
+	}) {
+		t.Fatalf("checkpoint not updated to the rotated file's inode (old=%d new=%d): %+v",
+			oldIno, newIno, readCheckpoint(t, state))
 	}
 }

@@ -92,6 +92,12 @@
   .stat .d{width:8px;height:8px;border-radius:50%}
   .ok{color:var(--accent)} .ok .d{background:var(--accent)}
   .bad{color:var(--crit)} .bad .d{background:var(--crit)}
+  /* agentd liveness: an unobtrusive "last seen" line on a tool card, red+STALE
+     when the collector hasn't heard from the agent within the threshold. */
+  .seen{font-size:11px;color:var(--faint);display:inline-flex;align-items:center;gap:5px}
+  .seen .ld{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+  .seen.stale{color:var(--crit);font-weight:600}
+  .seen.stale .ld{background:var(--crit)}
 
   .threats{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
   .threat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 14px}
@@ -130,6 +136,12 @@
     <div class="posture" id="posture">
       <span class="dot" id="postureDot"></span>
       <div><div class="lbl">posture</div><div class="val" id="postureVal">—</div></div>
+    </div>
+    <!-- agentd liveness: hidden until the collector reports a last-seen for the
+         real-time agent; turns red / STALE when the agent stops checking in. -->
+    <div class="posture" id="agentLive" style="display:none">
+      <span class="dot" id="agentLiveDot"></span>
+      <div><div class="lbl">agentd</div><div class="val" id="agentLiveVal" style="font-size:13px">—</div></div>
     </div>
   </header>
 
@@ -239,6 +251,18 @@ const SAMPLE = [
 
 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
 let DATA = SAMPLE.slice();
+/* agentd liveness, keyed by tool id → {age_seconds, stale, last_seen}. Populated
+   from the collector's /api/summary; empty in the static/sample build (no signal,
+   so no indicator is shown — purely additive). */
+let LIVENESS = {};
+
+/* humanAge renders an age in seconds as a compact "Ns / Nm / Nh ago". */
+function humanAge(sec){
+  if(sec==null||sec<0) return "never";
+  if(sec<60) return sec+"s ago";
+  if(sec<3600) return Math.floor(sec/60)+"m ago";
+  return Math.floor(sec/3600)+"h ago";
+}
 
 /* ---------- rendering ---------- */
 const $ = s => document.querySelector(s);
@@ -295,10 +319,16 @@ function renderTools(){
   $("#tools").innerHTML = TOOLS.map(t=>{
     const c=counts[t.id]; const has=!!c; const clean=!has||c.worst>=2;
     const statusTxt = !has ? "no data" : clean ? `${c.n} info/low` : `${c.n} findings`;
+    // Liveness line (additive): only when the collector reported a last-seen for
+    // this tool. Red + "STALE" when the agent hasn't checked in within threshold.
+    const lv=LIVENESS[t.id];
+    const seen = lv ? `<div class="seen${lv.stale?' stale':''}"><span class="ld"></span>${
+      lv.stale?`STALE — last seen ${humanAge(lv.age_seconds)}`:`last seen ${humanAge(lv.age_seconds)}`}</div>` : "";
     return `<div class="tcard">
       <div class="h"><span class="name">${t.id}</span>
         <span class="stat ${clean?'ok':'bad'}"><span class="d"></span>${clean?'clean':'attention'}</span></div>
       <div class="job">${t.job}</div>
+      ${seen}
       <div class="foot"><span class="stack">${t.stack}</span><span style="color:var(--muted);font-size:11.5px">${statusTxt}</span></div>
     </div>`;}).join("");
 }
@@ -340,17 +370,52 @@ renderAll();
    serves this page, or the local collector when this runs as the Tauri desktop
    app / a local file. On static hosting (GitHub Pages) every attempt fails and
    we keep the sample data. Real findings never leave the device either way. */
+const BASES=["", "http://127.0.0.1:8787/", "http://localhost:8787/"];
 (async function(){
-  const urls=["api/findings","http://127.0.0.1:8787/api/findings","http://localhost:8787/api/findings"];
-  for(const u of urls){
+  for(const b of BASES){
     try{
-      const res=await fetch(u,{cache:"no-store"});
+      const res=await fetch(b+"api/findings",{cache:"no-store"});
       if(!res.ok) continue;
       const live=ingest(await res.json());
       if(live.length){DATA=live;document.querySelector(".banner b").textContent="live";renderAll();return;}
     }catch(e){/* try next source */}
   }
 })();
+
+/* agentd liveness: poll /api/summary for per-tool last_seen + stale. Purely
+   additive — failure (static hosting) just leaves the indicator hidden and never
+   touches the findings render. Refreshed on an interval so a STALE agent surfaces
+   even while the page stays open. */
+function applyLiveness(sum){
+  if(!sum||!Array.isArray(sum.tools)) return;
+  const map={};
+  for(const ts of sum.tools){ if(ts&&ts.tool) map[ts.tool]=ts; }
+  LIVENESS=map;
+  // Dedicated agentd badge in the header (the real-time agent posts as tool "agent").
+  const a=map["agent"], box=$("#agentLive");
+  if(a){
+    box.style.display="";
+    $("#agentLiveVal").textContent = (a.stale?"STALE · ":"")+"last seen "+humanAge(a.age_seconds);
+    $("#agentLiveDot").style.background = a.stale ? "var(--crit)" : "var(--accent)";
+    $("#agentLiveVal").style.color = a.stale ? "var(--crit)" : "var(--txt)";
+  }else{
+    box.style.display="none";
+  }
+  renderTools();
+}
+async function loadLiveness(){
+  for(const b of BASES){
+    try{
+      const res=await fetch(b+"api/summary",{cache:"no-store"});
+      if(!res.ok) continue;
+      applyLiveness(await res.json());
+      return true;
+    }catch(e){/* try next source */}
+  }
+  return false;
+}
+loadLiveness();
+setInterval(loadLiveness, 15000);
 
 /* --- M3 manual-response panel (Tauri desktop app ONLY) ---
    The browser / GitHub-Pages build has no Tauri IPC, so this stays hidden there.

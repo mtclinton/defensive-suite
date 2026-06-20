@@ -53,6 +53,12 @@ func rank(s string) int {
 	return 5
 }
 
+// DefaultStaleAfter is how long a (tool, host) may go without a received report
+// before it is flagged stale. A healthy agentd heartbeats every flush (default
+// ~10s), so 90s tolerates several missed flushes (transient slowness) before
+// concluding the agent is dead or crash-looping.
+const DefaultStaleAfter = 90 * time.Second
+
 // Store is the concurrency-safe report store.
 type Store struct {
 	mu         sync.RWMutex
@@ -61,6 +67,9 @@ type Store struct {
 	retain     time.Duration
 	maxReports int
 	now        func() time.Time
+	// staleAfter is the liveness threshold for Summary's per-tool stale flag;
+	// injectable (with now) for deterministic tests.
+	staleAfter time.Duration
 }
 
 // New opens (and loads) a store rooted at dataDir.
@@ -73,6 +82,7 @@ func New(dataDir string, retain time.Duration, maxReports int) (*Store, error) {
 		retain:     retain,
 		maxReports: maxReports,
 		now:        time.Now,
+		staleAfter: DefaultStaleAfter,
 	}
 	s.load()
 	return s, nil
@@ -86,11 +96,32 @@ func reportTime(r Report) time.Time {
 }
 
 // AddReport stores a report, stamping its receive time, and persists the set.
+//
+// An empty heartbeat (an Append report with no findings — agentd posts one every
+// flush so liveness keeps advancing) must NOT accumulate as history: storing one
+// every flush would flood /api/reports, evict real findings reports under
+// maxReports, and rewrite the store to disk every flush. So we COALESCE it onto
+// the prior heartbeat for this (tool,host) — at most one heartbeat per source,
+// updated in place — and skip the disk save (a heartbeat is ephemeral; on restart
+// the agent re-heartbeats within a flush interval). The agent still appears in
+// Summary (its coalesced heartbeat carries the advancing Received), and real
+// reports are untouched.
 func (s *Store) AddReport(r Report) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r.Received.IsZero() {
 		r.Received = s.now()
+	}
+	if r.Append && len(r.Findings) == 0 {
+		for i := range s.reports {
+			if s.reports[i].Tool == r.Tool && s.reports[i].Host == r.Host &&
+				s.reports[i].Append && len(s.reports[i].Findings) == 0 {
+				s.reports[i].Received = r.Received // advance liveness in place
+				return
+			}
+		}
+		s.reports = append(s.reports, r) // first heartbeat for this source
+		return
 	}
 	s.reports = append(s.reports, r)
 	s.prune()
@@ -157,6 +188,11 @@ type posture struct {
 	Host     string
 	Time     time.Time
 	Findings []Finding
+	// Received is the most recent receive time across the key's reports — the
+	// liveness signal. A healthy agentd posts a heartbeat every flush even with
+	// zero findings, so a Received that stops advancing means the agent is dead or
+	// crash-looping, independent of how many findings it last reported.
+	Received time.Time
 }
 
 // current resolves the current posture per (tool, host). For keys whose stream
@@ -174,6 +210,7 @@ func (s *Store) current() []posture {
 	type acc struct {
 		tool, host string
 		time       time.Time
+		received   time.Time
 		findings   []Finding
 	}
 	byKey := map[string]*acc{}
@@ -199,10 +236,16 @@ func (s *Store) current() []posture {
 		if rt.After(a.time) {
 			a.time = rt
 		}
+		// Track the latest receive time for liveness. An empty heartbeat (Append
+		// with no findings) still advances this, so a quiet healthy agent stays
+		// "fresh" while a dead one goes stale.
+		if r.Received.After(a.received) {
+			a.received = r.Received
+		}
 	}
 	out := make([]posture, 0, len(byKey))
 	for _, a := range byKey {
-		out = append(out, posture{Tool: a.tool, Host: a.host, Time: a.time, Findings: a.findings})
+		out = append(out, posture{Tool: a.tool, Host: a.host, Time: a.time, Received: a.received, Findings: a.findings})
 	}
 	return out
 }
@@ -257,6 +300,13 @@ type ToolStatus struct {
 	Count int       `json:"count"`
 	Clean bool      `json:"clean"`
 	Time  time.Time `json:"time"`
+	// LastSeen is when the collector last received a report (or heartbeat) for
+	// this (tool, host); zero if never recorded. AgeSeconds is its age at the time
+	// the summary was computed, and Stale is true when that age exceeds the store's
+	// threshold — the signal a dead/crash-looping agent surfaces with.
+	LastSeen   time.Time `json:"last_seen,omitempty"`
+	AgeSeconds int64     `json:"age_seconds"`
+	Stale      bool      `json:"stale"`
 }
 
 // Summary is the roll-up the dashboard header consumes.
@@ -288,6 +338,11 @@ func (s *Store) Summary() Summary {
 	hosts := map[string]bool{}
 	worst := 5
 	var updated time.Time
+	now := s.now()
+	staleAfter := s.staleAfter
+	if staleAfter <= 0 {
+		staleAfter = DefaultStaleAfter
+	}
 	for _, r := range s.current() {
 		if r.Time.After(updated) {
 			updated = r.Time
@@ -306,10 +361,25 @@ func (s *Store) Summary() Summary {
 				tWorst = rank(fd.Severity)
 			}
 		}
-		sum.Tools = append(sum.Tools, ToolStatus{
+		// Liveness: age the last receive time against the clock. A never-seen key
+		// (zero Received) is treated as stale — we have no evidence it is alive.
+		ts := ToolStatus{
 			Tool: r.Tool, Host: r.Host, Worst: worstName(tWorst),
 			Count: len(r.Findings), Clean: tWorst > 2, Time: r.Time,
-		})
+			LastSeen: r.Received,
+		}
+		if r.Received.IsZero() {
+			ts.AgeSeconds = -1
+			ts.Stale = true
+		} else {
+			age := now.Sub(r.Received)
+			if age < 0 {
+				age = 0
+			}
+			ts.AgeSeconds = int64(age / time.Second)
+			ts.Stale = age > staleAfter
+		}
+		sum.Tools = append(sum.Tools, ts)
 	}
 	if sum.Findings > 0 {
 		sum.Worst = worstName(worst)

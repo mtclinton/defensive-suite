@@ -136,6 +136,33 @@ func TestEmitWebhookEmptyURLIsNoop(t *testing.T) {
 	}
 }
 
+// EmitWebhookBytes POSTs the supplied bytes VERBATIM (the spool replays the exact
+// stored body), sets auth + content-type, and a blank URL is a no-op.
+func TestEmitWebhookBytesPostsVerbatim(t *testing.T) {
+	var body []byte
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ = io.ReadAll(req.Body)
+		auth = req.Header.Get("Authorization")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	raw := []byte(`{"tool":"agent","custom":true}`)
+	if err := EmitWebhookBytes(context.Background(), srv.Client(), srv.URL, "Bearer k", raw); err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != string(raw) {
+		t.Errorf("body should be sent verbatim: got %q want %q", body, raw)
+	}
+	if auth != "Bearer k" {
+		t.Errorf("auth=%q", auth)
+	}
+	if err := EmitWebhookBytes(context.Background(), nil, "", "", raw); err != nil {
+		t.Errorf("blank url should be a no-op, got %v", err)
+	}
+}
+
 func TestEmitWebhookErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

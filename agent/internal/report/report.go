@@ -195,6 +195,21 @@ func EmitWebhook(ctx context.Context, client *http.Client, url, authHeader strin
 	if url == "" {
 		return nil
 	}
+	body, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	return EmitWebhookBytes(ctx, client, url, authHeader, body)
+}
+
+// EmitWebhookBytes POSTs an already-marshalled report body to url. It exists so
+// agentd's delivery spool can persist the EXACT bytes of a failed POST and replay
+// them verbatim later — re-marshalling could in principle differ — and so the
+// flush/replay paths share one delivery implementation. A blank url is a no-op.
+func EmitWebhookBytes(ctx context.Context, client *http.Client, url, authHeader string, body []byte) error {
+	if url == "" {
+		return nil
+	}
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -208,10 +223,6 @@ func EmitWebhook(ctx context.Context, client *http.Client, url, authHeader strin
 		return http.ErrUseLastResponse
 	}
 	client = &noRedirect
-	body, err := json.Marshal(r)
-	if err != nil {
-		return err
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
