@@ -21,6 +21,7 @@ import (
 
 	"github.com/mtclinton/defensive-suite/agent/internal/config"
 	"github.com/mtclinton/defensive-suite/agent/internal/pipeline"
+	"github.com/mtclinton/defensive-suite/agent/internal/preflight"
 	"github.com/mtclinton/defensive-suite/agent/internal/report"
 	"github.com/mtclinton/defensive-suite/agent/internal/respond"
 )
@@ -40,6 +41,8 @@ func main() {
 		usage(os.Stdout)
 	case cmd == "scan":
 		os.Exit(cmdScan(args[1:]))
+	case cmd == "preflight":
+		os.Exit(cmdPreflight(args[1:]))
 	case cmd == "run":
 		os.Exit(cmdRun(args[1:]))
 	case cmd == "" || strings.HasPrefix(cmd, "-"):
@@ -55,8 +58,9 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `agentd — defensive-suite real-time agent (observe mode)
 
 usage:
-  agentd run   [flags]   tail Tetragon's JSON export → findings → collector
-  agentd scan  [flags]   evaluate a Tetragon JSON file once (for testing)
+  agentd run        [flags]   tail Tetragon's JSON export → findings → collector
+  agentd scan       [flags]   evaluate a Tetragon JSON file once (for testing)
+  agentd preflight  [flags]   READ-ONLY host-readiness check for arming enforcement
   agentd version
 
 flags (env AGENT_* also apply):
@@ -64,6 +68,13 @@ flags (env AGENT_* also apply):
         -response-socket PATH   serve the manual-response API on a unix socket
         -enable-response        ACTUALLY perform actions (default OFF → dry-run)
   scan: -file PATH (- = stdin)  -collector URL  -no-post  -format text|json
+  preflight: -post   also POST the readiness report to the collector
+             -format text|json   (default text)
+        Inspects host state (BTF, kernel config, nftables, fapolicyd, Tetragon,
+        sockets, loaded policies) and reports whether enforcement can be armed.
+        STRICTLY READ-ONLY: it loads no policy, enables no enforcement, and
+        writes no rule. Arming is a documented, human-run step — see
+        deploy/ENFORCE.md. Exit: 0 ready · 2 not-ready · 1 verifier error.
 
 env: AGENT_TETRAGON_LOG, AGENT_COLLECTOR_URL, AGENT_COLLECTOR_AUTH (e.g. "Bearer …"),
      AGENT_HOST, AGENT_BPF_ALLOWLIST, AGENT_FLUSH_SECONDS,
@@ -121,6 +132,53 @@ func cmdScan(args []string) int {
 		printText(os.Stdout, rep)
 	}
 	return rep.ExitCode()
+}
+
+// cmdPreflight runs the READ-ONLY host-readiness checks for arming enforcement
+// and sets the exit code (0 ready / 2 not-ready / 1 error). It NEVER mutates the
+// host: it builds the real (read-only) Runner/FS, probes state, prints a table
+// (or JSON), and optionally POSTs the readiness report to the collector via the
+// same EmitWebhook path scan/run use. No policy is loaded, no enforcement
+// enabled, no rule written — arming is documented in deploy/ENFORCE.md.
+func cmdPreflight(args []string) int {
+	fs := flag.NewFlagSet("preflight", flag.ExitOnError)
+	post := fs.Bool("post", false, "also POST the readiness report to the collector")
+	collector := fs.String("collector", "", "override collector URL")
+	format := fs.String("format", "text", "output format: text|json")
+	_ = fs.Parse(args)
+
+	cfg := config.Load(os.Getenv)
+	if *collector != "" {
+		cfg.CollectorURL = *collector
+	}
+
+	// Real, read-only implementations. Inputs with nil fields would also resolve
+	// to these; we pass them explicitly for clarity.
+	checks := preflight.Run(preflight.Inputs{
+		Runner: preflight.RealRunner{},
+		FS:     preflight.RealFS{},
+		Getenv: os.Getenv,
+	})
+	rep := preflight.ToReport(cfg.Host, time.Now(), checks)
+
+	if *post && cfg.CollectorURL != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		client := &http.Client{Timeout: 15 * time.Second}
+		if err := report.EmitWebhook(ctx, client, cfg.CollectorURL, cfg.CollectorAuth, rep); err != nil {
+			fmt.Fprintln(os.Stderr, "agentd: collector:", err)
+		}
+		cancel()
+	}
+
+	switch *format {
+	case "json":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(rep)
+	default:
+		preflight.WriteTable(os.Stdout, checks)
+	}
+	return preflight.ExitCode(checks)
 }
 
 func cmdRun(args []string) int {

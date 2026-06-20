@@ -1,0 +1,157 @@
+# =============================================================================
+# defensive-suite — Tetragon TracingPolicy (M4, ENFORCE mode)
+#
+#   >>> SHIPPED, NOT APPLIED. REVIEW EVERY LINE. VALIDATE IN A VM FIRST. <<<
+#   The build and tests NEVER load this. Loading it ARMS BLOCKING on the host.
+#   See deploy/ENFORCE.md for the full, human-run arming runbook + rollback.
+# =============================================================================
+#
+# WHAT THIS POLICY DOES
+# ---------------------
+# It flips ONE hook from observe to enforce: the eBPF-program-load path
+# (`security_bpf_prog_load`). A bpf() program load by a binary that is NOT on the
+# loader allow-list is killed with SIGKILL. This is bpfsentry's load-time signal
+# with enforcement turned on — it stops a rootkit/implant from loading its own
+# eBPF program while letting your legitimate loaders work.
+#
+# The file-write and exec hooks below stay OBSERVE-only in Phase 1 (alert, do not
+# block), exactly as the design's "Prevention policies" table specifies — those
+# get an `Override` block only in a later phase, after they've been corroborated.
+#
+# WHY SIGKILL (and not Override)
+# ------------------------------
+# `Sigkill` sends SIGKILL to the offending process. It is broadly available and
+# does NOT require a kernel built with CONFIG_BPF_KPROBE_OVERRIDE. `Override`
+# (injecting a return value to make the bpf() call itself fail) WOULD need that
+# kernel option — which is why M4 uses Sigkill. `agentd preflight` reports
+# CONFIG_BPF_KPROBE_OVERRIDE as advisory/medium for exactly this reason.
+#
+# THE ALLOW-LIST IS LOAD-BEARING — EDIT IT BEFORE ARMING
+# ------------------------------------------------------
+# `matchBinaries` with operator "NotIn" means: the action fires for any binary
+# whose path is NOT in `values`. So `values` MUST list every legitimate eBPF
+# loader on YOUR host, or you will SIGKILL Cilium/Tetragon/your own tracer the
+# instant they load a program. Confirm the real paths on your host first:
+#
+#     command -v cilium-agent tetragon bpfsentry
+#     readlink -f $(command -v cilium-agent)   # resolve symlinks to the real ELF
+#
+# Tetragon matches the executable's resolved path. Adjust the entries below to the
+# absolute paths you actually run. When in doubt, run OBSERVE (dsuite-observe.yaml)
+# first and watch which loaders appear before you ever arm this.
+#
+# ARMING DISCIPLINE (non-negotiable)
+# ----------------------------------
+#   1. Run `agentd preflight` and read it — confirm BTF + Tetragon active.
+#   2. Load OBSERVE first; watch findings; confirm your loaders are allow-listed.
+#   3. Flip ONE policy to enforce at a time. This file is that one policy.
+#   4. Test the kill in a VM, never first on the daily driver.
+#   5. Rollback is one command: `sudo tetra tracingpolicy delete dsuite-enforce`.
+#
+# Install (privileged — REVIEW, do not auto-run):
+#     sudo tetra tracingpolicy add dsuite-enforce.yaml
+# Confirm it loaded:
+#     sudo tetra tracingpolicy list
+# Remove (rollback):
+#     sudo tetra tracingpolicy delete dsuite-enforce
+# -----------------------------------------------------------------------------
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: dsuite-enforce
+spec:
+  kprobes:
+    # -------------------------------------------------------------------------
+    # (1) eBPF-rootkit load — ENFORCE (SIGKILL non-allowlisted loaders).
+    #
+    # security_bpf_prog_load is reached when a process loads an eBPF program.
+    # The selector below fires only when the LOADING BINARY is NOT one of the
+    # allow-listed legitimate loaders, and the action SIGKILLs that process.
+    #
+    # matchBinaries + operator "NotIn":
+    #   fire for any executable whose path is NOT in `values`.
+    # matchActions + action "Sigkill":
+    #   send SIGKILL to the matched process (no CONFIG_BPF_KPROBE_OVERRIDE needed).
+    # -------------------------------------------------------------------------
+    - call: "security_bpf_prog_load"
+      syscall: false
+      selectors:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                # ---- ALLOW-LIST: your legitimate eBPF loaders. EDIT FOR YOUR HOST. ----
+                # Cilium's agent (loads its own datapath/Tetragon programs):
+                - "/usr/bin/cilium-agent"
+                - "/usr/local/bin/cilium-agent"
+                # Tetragon itself (it loads eBPF to observe/enforce):
+                - "/usr/bin/tetragon"
+                - "/usr/local/bin/tetragon"
+                # The defensive-suite's own eBPF tracer / bpfsentry loader:
+                - "/usr/local/bin/bpfsentry"
+                # (Add: bpftool, systemd, your distro's BPF-LSM loader, etc., as
+                #  observed in OBSERVE mode. An incomplete list SIGKILLs a legit
+                #  loader — start in observe and confirm before arming.)
+                # ----------------------------------------------------------------------
+          matchActions:
+            # SIGKILL the non-allowlisted loader. This is the M4 enforcement.
+            - action: Sigkill
+
+    # -------------------------------------------------------------------------
+    # (2) Trust-path file writes — OBSERVE only in Phase 1 (alert, do NOT block).
+    #
+    # Per the design's prevention table, ld.so.preload / pam.d / authorized_keys
+    # writes are ALERTED in P1 and only `Override`-blocked later — blocking these
+    # risks killing the package manager or your editor mid-write. So this hook has
+    # NO matchActions: every write to a trust-path file is reported, nothing is
+    # blocked. (Mirrors dsuite-observe.yaml; kept here so the enforce bundle is
+    # self-describing. Load THIS policy INSTEAD of dsuite-observe.yaml — it already
+    # contains the observe hooks. Tetragon does NOT de-duplicate hooks across
+    # policies, so loading both would double-hook security_file_permission and emit
+    # duplicate events.)
+    # -------------------------------------------------------------------------
+    - call: "security_file_permission"
+      syscall: false
+      args:
+        - index: 0
+          type: "file"
+        - index: 1
+          type: "int"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Prefix"
+              values:
+                - "/etc/ld.so.preload"
+                - "/etc/pam.d/"
+                - "/root/.ssh/"
+                - "/lib/security/"
+                - "/lib64/security/"
+                - "/usr/lib64/security/"
+                - "/etc/ssh/sshd_config"
+            - index: 1
+              operator: "Mask"
+              values:
+                - "2" # MAY_WRITE — drop read/exec accesses
+          # NO matchActions → OBSERVE only (alert in P1, per design).
+        - matchArgs:
+            - index: 0
+              operator: "Postfix"
+              values:
+                - "/.ssh/authorized_keys"
+                - "/.ssh/authorized_keys2"
+            - index: 1
+              operator: "Mask"
+              values:
+                - "2" # MAY_WRITE
+          # NO matchActions → OBSERVE only.
+
+  # ---------------------------------------------------------------------------
+  # (3) Fileless / "(deleted)" exec, X11-lock masquerade — OBSERVE only in P1.
+  #
+  # process_exec events are emitted by Tetragon by DEFAULT (no kprobe needed),
+  # so there is no hook to add here. The design says SIGKILL these "after
+  # corroborating with the existing detectors" — that corroboration + enforce
+  # flip is a later step. In Phase 1 agentd's rules ALERT on these from the
+  # default exec stream; this policy does not enforce them. Documented here so
+  # the enforce bundle reflects all three rows of the prevention table.
+  # ---------------------------------------------------------------------------

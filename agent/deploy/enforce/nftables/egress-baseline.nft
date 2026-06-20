@@ -1,0 +1,66 @@
+#!/usr/sbin/nft -f
+# =============================================================================
+# defensive-suite — OPTIONAL nftables egress baseline (M4 prevention, optional)
+#
+#   >>> SHIPPED, NOT APPLIED. REVIEW EVERY LINE. VALIDATE IN A VM FIRST. <<<
+#   The build/tests never load this ruleset. Loading it RESTRICTS egress and CAN
+#   LOCK YOU OUT if the management interface is wrong. This is OPTIONAL and
+#   separate from the M3 `isolate` response actuator (table `inet dsuite_isolate`).
+# =============================================================================
+#
+# WHAT THIS DOES
+# --------------
+# A conservative default-allow-but-logged egress baseline: it permits normal
+# outbound traffic and loopback, but LOGS new outbound connections so anomalous
+# egress (beaconing, exfil) is visible. It deliberately does NOT default-drop
+# egress on a daily driver — that's a foot-gun. Tighten to default-drop only in a
+# VM, with your management/Tailscale interface explicitly kept up.
+#
+# >>> EDIT `define mgmt_iface` AND `define mgmt_net` TO YOUR HOST BEFORE LOADING. <<<
+# If these are wrong and you switch the policy to drop, you self-lock-out. The
+# design's #1 isolate foot-gun: "never drop the mgmt iface; keep SSH/Tailscale up."
+#
+# Load (privileged — REVIEW, do not auto-run):
+#     sudo nft -f egress-baseline.nft
+# Inspect what's loaded:
+#     sudo nft list table inet dsuite_egress
+# Rollback (remove just this table; leaves other firewall rules intact):
+#     sudo nft delete table inet dsuite_egress
+# -----------------------------------------------------------------------------
+
+# EDIT THESE for your host before loading:
+define mgmt_iface = "tailscale0"          # your keep-up / management interface
+define mgmt_net   = 100.64.0.0/10         # Tailscale CGNAT range; adjust as needed
+
+# Use a DEDICATED table name so rollback is a clean `delete table`, never
+# touching your distro's main firewall.
+table inet dsuite_egress {
+    chain output {
+        # Base policy ACCEPT on a daily driver: we OBSERVE, we don't break egress.
+        # Flip to `policy drop;` ONLY in a VM, after the keep-up rules below are
+        # confirmed — otherwise you cut your own remote access.
+        type filter hook output priority 0; policy accept;
+
+        # Always allow loopback — never break local IPC.
+        oif "lo" accept
+
+        # Always keep the management/Tailscale interface up (anti-lockout).
+        oifname $mgmt_iface accept
+        ip daddr $mgmt_net accept
+
+        # Allow established/related return traffic.
+        ct state established,related accept
+
+        # Allow DNS and NTP so the box stays usable (review: tighten to your
+        # resolver/NTP server if you want).
+        udp dport { 53, 123 } accept
+        tcp dport 53 accept
+
+        # LOG new outbound connections (this is the observability win). Rate-
+        # limited so a busy host doesn't flood the journal.
+        ct state new limit rate 10/second log prefix "dsuite_egress_new: " level info
+
+        # (When you move to default-drop in a VM, add explicit `accept` rules for
+        #  the destinations you actually need, then change the policy above.)
+    }
+}

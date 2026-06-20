@@ -1,0 +1,60 @@
+defensive-suite — fapolicyd block-hash rules (M4 prevention baseline)
+
+  >>> SHIPPED, NOT APPLIED. REVIEW FIRST. VALIDATE IN A VM. <<<
+  The build/tests never write a fapolicyd rule. agentd's block-hash response
+  actuator (M3) and this baseline both go through fapolicyd; nothing here is
+  applied automatically.
+
+WHAT FAPOLICYD GIVES US
+-----------------------
+fapolicyd is an application allow/deny daemon. It can DENY execution of a binary
+by SHA-256 hash or by path. The defensive-suite uses it two ways:
+
+  1. M3 response actuator `block-hash`: agentd writes a deny-by-SHA-256 rule when
+     an operator chooses to block a flagged binary. It is REVERSIBLE — remove the
+     rule file and reload. agentd dry-runs the rule first and refuses to deny a
+     critical system binary.
+
+  2. M4 prevention baseline (this dir): a small, reviewed set of static deny
+     rules you maintain by hand for known-bad hashes.
+
+THE rules.d PATH (where deny rules live)
+----------------------------------------
+On a standard install, fapolicyd reads rule files from:
+
+    /etc/fapolicyd/rules.d/        # *.rules, lexically ordered (e.g. 50-dsuite.rules)
+    /etc/fapolicyd/fapolicyd.trust # the trust database (known-good files)
+
+A deny-by-hash rule looks like (REVIEW; do not blind-copy):
+
+    # 50-dsuite.rules — deny a specific known-bad binary by SHA-256
+    deny perm=execute exe=/ : sha256hash=<64-hex-of-the-bad-binary>
+
+A deny-by-path rule:
+
+    deny perm=execute exe=/ : path=/tmp/suspicious-dropper
+
+After EDITING a rule file you must compile + reload (privileged — REVIEW):
+
+    sudo fapolicyd-cli --update        # recompile rules.d into the running policy
+    # or, if your build expects a service reload:
+    sudo systemctl reload fapolicyd
+
+ARMING DISCIPLINE
+-----------------
+  - Run `agentd preflight` first — it reports whether fapolicyd is present AND
+    active. block-hash and these rules do nothing if the daemon is inactive.
+  - fapolicyd starts in PERMISSIVE on many distros; confirm enforce mode only
+    after you've trusted your real binaries, or you will block your own desktop.
+    Check /etc/fapolicyd/fapolicyd.conf (permissive = 1 → 0) — VM-FIRST.
+  - NEVER deny a critical system binary (shell, coreutils, the package manager,
+    sshd). agentd's block-hash guardrails refuse these; a hand-written rule has
+    no such guard, so review every hash.
+
+ROLLBACK
+--------
+    sudo rm /etc/fapolicyd/rules.d/50-dsuite.rules
+    sudo fapolicyd-cli --update        # (or systemctl reload fapolicyd)
+
+Reference: see deploy/RESPONSE.md for how the M3 block-hash actuator uses the
+same path, and deploy/ENFORCE.md for the overall arming runbook.
