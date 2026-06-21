@@ -155,6 +155,34 @@ alert-only, stays manual, or is opt-in behind its own switch.
 
 ## 3. Trigger + action policy
 
+The decision funnel — a finding must pass every gate, then action-select, then the brakes
+and the mode gate; in this build the path always ends at *shadow* (emit, never execute) or a
+*fatal refusal* for canary/armed:
+
+```mermaid
+flowchart TD
+  F["realtime finding"] --> G1{"G1 correlated?"}
+  G1 -- no --> A["alert-only / drop"]
+  G1 -- yes --> G4{"G4 resolved=exec_id?"}
+  G4 -- no --> A
+  G4 -- yes --> G5{"G5 live exe, under StagingDir, same-UID, not protected?"}
+  G5 -- no --> A
+  G5 -- yes --> G6{"G6 event fresh (TTL)?"}
+  G6 -- no --> A
+  G6 -- yes --> G7{"G7 dst external (routable, non-RFC1918)?"}
+  G7 -- no --> A
+  G7 -- yes --> G8{"G8 base fileless/bpf, not bare staging?"}
+  G8 -- no --> A
+  G8 -- yes --> SEL{"action select (§3.4)"}
+  SEL -- "any bpf suspicion" --> A
+  SEL -- "fileless + egress" --> Q["would-quarantine (live-identity-bound)"]
+  Q --> BR{"auto-disarm or rate budget tripped?"}
+  BR -- yes --> T["throttled → alert-only"]
+  BR -- no --> M{"mode"}
+  M -- "off / dry-run / shadow" --> S["emit realtime.autoresponse.shadow (NEVER executes)"]
+  M -- "canary / armed" --> X["FATAL preflight refusal (until gates + soak)"]
+```
+
 ### 3.1 Trigger gate — all conditions AND-ed (with an honest account of which are independent)
 
 An auto-action is *considered* only when **every** predicate holds:
@@ -576,6 +604,27 @@ goroutine"; `TailWithState` invokes the callback synchronously, `main.go:217-218
 ---
 
 ## 7. Operational rollout
+
+```mermaid
+stateDiagram-v2
+  [*] --> off
+  off --> dry_run: opt-in
+  dry_run --> shadow: opt-in
+  shadow --> canary: FP-soak PASS (§7.2) + un-gating
+  canary --> armed: canary clean, broaden action set
+  note right of shadow
+    today's ceiling.
+    FP-soak (§7.2): measure the
+    candidate rate on a real
+    workload >= 14 days.
+  end note
+  note right of canary
+    un-gating needs: bridge wire,
+    grace/undo, lockout watchdog,
+    console push, authed export,
+    linkat-by-fd hardening.
+  end note
+```
 
 `AGENT_AUTORESPONSE_MODE` drives a **strict, monotonic, config-gated ladder.** You never jump
 to `armed`; each promotion is a deliberate config change requiring the soak gate (§7.2)
