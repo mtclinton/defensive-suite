@@ -143,7 +143,7 @@
   .view-pane[hidden]{display:none}
 
   /* Overview: fixed rows; ONLY the feed scrolls internally. */
-  #v-overview{padding:16px 18px;display:grid;grid-template-rows:auto auto 1fr;gap:14px}
+  #v-overview:not([hidden]){padding:16px 18px;display:grid;grid-template-rows:auto auto 1fr;gap:14px}
 
   .kpis{display:flex;gap:10px}
   .kpi{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:9px 13px;display:flex;align-items:baseline;gap:9px}
