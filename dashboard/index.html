@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-palette="noir">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -10,22 +10,83 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bungee&family=Rubik+Mono+One&family=Zilla+Slab:ital,wght@0,400;0,600;0,700;0,900;1,700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
+  /* ============================================================================
+     TWO-LAYER TOKEN MODEL (palette-switch token discipline, plan §1)
+     ----------------------------------------------------------------------------
+     LAYER A — STABLE MEANING (defined ONCE here on :root; NEVER remapped by a
+       palette). These carry semantics that must not drift when the chrome
+       changes: a CRITICAL must read critical in every palette, body/IOC text
+       must stay legible, confidence must stay off the severity hue family. So:
+         · --txt / --muted / --faint            (legible text ramp, ≥4.5:1 on dark)
+         · --sev-crit/high/med/low/info         (DESATURATED severity steps for
+                                                  12-13px chips, ≥3:1, no vibration)
+         · --conf-high/medium/low               (own hue family, never severity)
+         · --focus                              (visible keyboard focus ring, ≥3:1)
+       Confidence is pinned to FIXED hex (not var(--cyan)/var(--violet2)) precisely
+       so a brighter chrome palette can't pull a confidence badge toward a
+       severity reading. This is the whole point: switching palettes must NOT
+       require re-auditing severity / confidence meaning.
+
+     LAYER B — CHROME PRIMITIVES (declared here as the default "noir" palette, then
+       REMAPPED per <html data-palette="...">). Only chrome moves: surfaces, lines,
+       the violet/cyan/amber identity accents, the hero --crit accent, and the
+       manga texture colors (--ink-speed / --ink-half / --ink-onom). A11y note:
+       --crit is the ONE saturated red and is reserved for the HERO + large type
+       (≥24px → 3:1 suffices); small feed chips use the desaturated --sev-* above.
+     ============================================================================ */
   :root{
-    --bg:#0c0a14; --panel:#141021; --panel2:#0f0c1a; --raised:#1b1530;
-    --line:#2a2140; --line2:#3a2f55;
+    /* ---- LAYER A: stable meaning (palette-independent) ---- */
     --txt:#ece8f5; --muted:#9b8fc0; --faint:#6b5f8c;
-    --violet:#a06bd4; --violet2:#c084fc; --cyan:#2dd4d4; --amber:#f5c451;
-    /* hero accent: the ONE saturated red, reserved for the marquee + large type */
-    --crit:#ff4d5e;
-    /* feed severity: DESATURATED steps for small 12-13px chips (no optical vibration).
-       Severity MEANING stays here; the manga primitives can be remapped without re-auditing. */
-    --sev-crit:#d98a93; --sev-high:#cf9c7e; --sev-med:#c9b87a; --sev-low:#7fa6c9; --sev-info:#8a86a0;
-    /* confidence keeps its OWN hue family (cyan→violet→grey), deliberately NOT the
-       severity palette, so a ⬡ confidence badge is never read as a severity. */
-    --conf-high:var(--cyan); --conf-medium:var(--violet2); --conf-low:var(--faint);
+    /* feed severity: DESATURATED steps for small 12-13px chips (no optical vibration). */
+    --sev-crit:#e08a92; --sev-high:#d49a78; --sev-med:#cdbb73; --sev-low:#7fa6c9; --sev-info:#9893ac;
+    /* confidence keeps its OWN hue family, FIXED (never the severity palette, never
+       remapped) so a ⬡ confidence badge is never read as a severity in any palette. */
+    --conf-high:#3ad6d6; --conf-medium:#c084fc; --conf-low:#8b80ad;
+    /* visible keyboard focus ring — stable, high-contrast, palette-independent. */
+    --focus:#ffd866;
     --disp:'Bungee',sans-serif; --mono1:'Rubik Mono One',monospace;
     --slab:'Zilla Slab',Georgia,serif; --mono:'JetBrains Mono',monospace;
     --r:2px;
+
+    /* ---- LAYER B: chrome primitives — DEFAULT == "noir" (current violet/cyan/amber) ---- */
+    --bg:#0c0a14; --panel:#141021; --panel2:#0f0c1a; --raised:#1b1530;
+    --line:#2a2140; --line2:#3a2f55;
+    --violet:#a06bd4; --violet2:#c084fc; --cyan:#2dd4d4; --amber:#f5c451;
+    /* hero accent: the ONE saturated red, reserved for the marquee + large type */
+    --crit:#ff4d5e;
+    /* manga texture colors (speed-lines / halftone / onomatopoeia) — chrome, remapped */
+    --ink-speed:255,77,94;   /* rgb for the speed-line conic gradient */
+    --ink-half:var(--crit);  /* halftone dot color */
+    --ink-onom:var(--amber); /* onomatopoeia fill */
+  }
+
+  /* ---- PALETTE: NOIR (explicit, == :root default) — violet / cyan / amber, the
+     classic dockyard ink. Sober base that earns the right to go loud. ---- */
+  html[data-palette="noir"]{
+    --bg:#0c0a14; --panel:#141021; --panel2:#0f0c1a; --raised:#1b1530;
+    --line:#2a2140; --line2:#3a2f55;
+    --violet:#a06bd4; --violet2:#c084fc; --cyan:#2dd4d4; --amber:#f5c451;
+    --crit:#ff4d5e;
+    --ink-speed:255,77,94; --ink-half:var(--crit); --ink-onom:var(--amber);
+  }
+  /* ---- PALETTE: ANIME-DREAM — brighter saturated violet / pink / cyan on a cooler
+     near-black. More electric chrome; severity/confidence MEANING unchanged. ---- */
+  html[data-palette="anime-dream"]{
+    --bg:#0b0a16; --panel:#161226; --panel2:#100d1f; --raised:#221a3a;
+    --line:#332a52; --line2:#473a6e;
+    --violet:#b07cf0; --violet2:#d8a3ff; --cyan:#34e0e0; --amber:#ffd36e;
+    --crit:#ff5d8f;          /* hot-pink-leaning hero accent (still the ONE saturated red-family) */
+    --ink-speed:255,93,143; --ink-half:var(--crit); --ink-onom:var(--cyan);
+  }
+  /* ---- PALETTE: VERMILLION — red / amber-forward warm dark. The chrome itself
+     runs hot, so the hero --crit shifts to a deep blood-red to stay the loudest
+     thing; severity chips stay the SAME desaturated steps (no re-audit). ---- */
+  html[data-palette="vermillion"]{
+    --bg:#120a0b; --panel:#1d1112; --panel2:#160c0d; --raised:#2a1618;
+    --line:#3c2122; --line2:#56302f;
+    --violet:#d98a5a; --violet2:#f0a86a; --cyan:#e0b341; --amber:#f5c451;
+    --crit:#ff3b30;          /* deep saturated vermillion hero accent */
+    --ink-speed:255,59,48; --ink-half:var(--crit); --ink-onom:var(--amber);
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font-family:var(--slab);
@@ -51,7 +112,7 @@
   .pin{border-top:1px solid var(--line);padding-top:12px;margin-top:8px;display:flex;flex-direction:column;gap:9px}
   /* posture absorbs the "clean run" KPI. Colour set live from worst severity. */
   .posture{border-radius:var(--r);padding:9px 11px;border:1px solid var(--line2);background:var(--raised)}
-  .posture.bad{background:rgba(255,77,94,.08);border-color:var(--crit)}
+  .posture.bad{background:rgba(var(--ink-speed),.08);border-color:var(--crit)}
   .posture .p{font-family:var(--disp);font-size:14px}
   .posture.bad .p{color:var(--crit)}
   .posture.ok .p{color:var(--cyan)}
@@ -92,9 +153,9 @@
   /* ---- evidential HERO (all manga ink concentrated here) ---- */
   .hero{position:relative;border:2px solid var(--crit);border-radius:var(--r);overflow:hidden;background:var(--panel);display:grid;grid-template-columns:1fr 240px;min-height:0}
   .hero.calm{border-color:var(--line2)}
-  .hero .speed{position:absolute;inset:0;opacity:.5;pointer-events:none;background:repeating-conic-gradient(from 0deg at 80% 50%, rgba(255,77,94,.16) 0deg 1.4deg, transparent 1.4deg 4deg)}
+  .hero .speed{position:absolute;inset:0;opacity:.5;pointer-events:none;background:repeating-conic-gradient(from 0deg at 80% 50%, rgba(var(--ink-speed),.16) 0deg 1.4deg, transparent 1.4deg 4deg)}
   .hero.calm .speed{display:none}
-  .hero .halftone{position:absolute;inset:0;opacity:.10;pointer-events:none;background-image:radial-gradient(var(--crit) 1px, transparent 1.4px);background-size:7px 7px}
+  .hero .halftone{position:absolute;inset:0;opacity:.10;pointer-events:none;background-image:radial-gradient(var(--ink-half) 1px, transparent 1.4px);background-size:7px 7px}
   .hero.calm .halftone{display:none}
   .hero .L{position:relative;padding:15px 18px;display:flex;flex-direction:column;gap:8px;min-width:0}
   .tagrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -104,6 +165,11 @@
   .ent.file{color:var(--amber);border-color:rgba(245,196,81,.4)}
   .ent.host{color:var(--muted)}
   .corr{font-family:var(--mono1);font-size:9px;color:#1a0008;background:var(--crit);padding:3px 8px;border-radius:var(--r)}
+  /* hero severity chip: redundant non-color channel (glyph + word) so the hero's
+     severity reads in grayscale, not by the red border alone (a11y #9). */
+  .hsev{font-family:var(--mono);font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+    border:1px solid var(--line2);border-radius:var(--r);padding:2px 7px;display:inline-flex;align-items:center;gap:5px}
+  .hsev .gly{font-size:11px}
   .att{font-family:var(--mono);font-size:10px;color:var(--violet2);border:1px solid var(--line2);border-radius:var(--r);padding:2px 7px}
   .hconf{font-family:var(--mono);font-size:9.5px;font-weight:700;border-radius:999px;padding:1px 8px;text-transform:uppercase}
   .hconf.conf-high{color:var(--conf-high);border:1px solid var(--conf-high)}
@@ -117,8 +183,8 @@
   .node{font-family:var(--mono);font-size:11px;padding:6px 9px;border:1px solid var(--line2);border-radius:var(--r);background:var(--panel2);white-space:nowrap}
   .node b{color:var(--txt)} .node .id{color:var(--faint)}
   .arr{font-family:var(--mono1);font-size:11px;color:var(--crit)}
-  .node.egress{border-color:var(--crit);color:var(--crit);background:rgba(255,77,94,.1);box-shadow:0 0 16px rgba(255,77,94,.35);animation:pulse 1.6s ease-in-out infinite}
-  @keyframes pulse{0%,100%{box-shadow:0 0 10px rgba(255,77,94,.25)}50%{box-shadow:0 0 22px rgba(255,77,94,.55)}}
+  .node.egress{border-color:var(--crit);color:var(--crit);background:rgba(var(--ink-speed),.1);box-shadow:0 0 16px rgba(var(--ink-speed),.35);animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 0 10px rgba(var(--ink-speed),.25)}50%{box-shadow:0 0 22px rgba(var(--ink-speed),.55)}}
   .acts{display:flex;gap:8px;margin-top:9px;align-items:center;flex-wrap:wrap}
   .btn{font-family:var(--mono);font-size:11px;border-radius:var(--r);padding:7px 13px;cursor:pointer;border:1px solid var(--line2);background:var(--raised);color:var(--txt)}
   .btn:hover{border-color:var(--cyan)}
@@ -127,7 +193,7 @@
   .acts .hint{margin-left:auto;align-self:center;font-family:var(--mono);font-size:10px;color:var(--faint)}
   .hero .R{position:relative;display:grid;place-items:center;border-left:1px solid var(--line2)}
   .hero.calm .R{display:none}
-  .onom{font-family:var(--mono1);color:var(--amber);font-size:38px;line-height:.9;text-align:center;transform:rotate(-8deg);text-shadow:3px 3px 0 var(--crit),6px 6px 0 rgba(0,0,0,.4)}
+  .onom{font-family:var(--mono1);color:var(--ink-onom);font-size:38px;line-height:.9;text-align:center;transform:rotate(-8deg);text-shadow:3px 3px 0 var(--crit),6px 6px 0 rgba(0,0,0,.4)}
 
   /* ---- feed: sober, recency-first, entity + glyph + time ---- */
   .feed{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);min-height:0;display:flex;flex-direction:column;overflow:hidden}
@@ -199,6 +265,40 @@
   .lin .step.chain{color:var(--violet2)}
   .drawer .acts{margin-top:2px}
 
+  /* ---- a11y: VISIBLE keyboard focus rings (plan #10 / contrast pass).
+     --focus is a stable, palette-independent high-contrast amber (≥3:1 on every
+     palette's surfaces). Applied to every interactive element + the keyboard
+     row selection so tab/j-k focus is never invisible. ---- */
+  :focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:var(--r)}
+  .nav:focus-visible,.btn:focus-visible,.ld:focus-visible,.row:focus-visible,
+  .x:focus-visible,#q:focus-visible,select:focus-visible,.swatch:focus-visible{
+    outline:2px solid var(--focus);outline-offset:2px}
+  .row.sel{box-shadow:inset 2px 0 0 var(--violet2),inset 0 0 0 1px var(--focus)}
+
+  /* ---- palette switcher control (top bar) ---- */
+  .pal{display:inline-flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line2);
+    border-radius:var(--r);padding:5px 8px;font-family:var(--mono);font-size:10px;color:var(--muted)}
+  .pal .lbl{color:var(--faint);text-transform:uppercase;letter-spacing:.1em;font-size:9px}
+  .pal .swatch{width:16px;height:16px;border-radius:50%;border:1px solid var(--line2);cursor:pointer;padding:0;
+    display:inline-grid;place-items:center;background:var(--bg)}
+  .pal .swatch .dot{width:9px;height:9px;border-radius:50%;display:block}
+  .pal .swatch.on{border-color:var(--focus);box-shadow:0 0 0 1px var(--focus)}
+  /* swatch previews each palette's identity accent (cyan-ish vs crit) deterministically */
+  .pal .swatch[data-pal="noir"] .dot{background:linear-gradient(135deg,#2dd4d4 50%,#a06bd4 50%)}
+  .pal .swatch[data-pal="anime-dream"] .dot{background:linear-gradient(135deg,#34e0e0 50%,#ff5d8f 50%)}
+  .pal .swatch[data-pal="vermillion"] .dot{background:linear-gradient(135deg,#ff3b30 50%,#f5c451 50%)}
+
+  /* ---- feed: grouped-finding count badge (event grouping #12) ---- */
+  .cnt-badge{font-family:var(--mono1);font-size:9px;color:var(--bg);background:var(--muted);
+    border-radius:999px;padding:1px 6px;line-height:1.3;white-space:nowrap}
+  .row.grp .cnt-badge{background:var(--violet2)}
+  /* grouped-instances block in the drawer */
+  .insts{display:flex;flex-direction:column;gap:7px}
+  .inst{border:1px solid var(--line);border-radius:var(--r);padding:7px 9px;background:var(--panel2)}
+  .inst .ip{font-family:var(--mono);font-size:11px;color:var(--txt);word-break:break-all}
+  .inst .id{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:2px;word-break:break-all}
+  .inst .it{font-family:var(--mono);font-size:9.5px;color:var(--faint);margin-top:2px}
+
   /* respect reduced motion */
   @media (prefers-reduced-motion: reduce){
     .node.egress{animation:none} .drawer{transition:none} .scrim{transition:none}
@@ -235,6 +335,14 @@
         <span>▟ <b id="dataState">sample</b> data</span>
         <label class="ld" style="cursor:pointer">load report JSON<input id="file" type="file" accept="application/json,.json" hidden multiple></label>
         <button class="ld" id="reset">reset</button>
+      </div>
+      <!-- palette switcher: remaps ONLY chrome primitives via <html data-palette>.
+           Severity / confidence meaning is stable across all three (see token model). -->
+      <div class="pal" role="group" aria-label="palette">
+        <span class="lbl">palette</span>
+        <button class="swatch" data-pal="noir" title="noir — violet / cyan / amber" aria-label="noir palette"><span class="dot"></span></button>
+        <button class="swatch" data-pal="anime-dream" title="anime-dream — violet / pink / cyan" aria-label="anime-dream palette"><span class="dot"></span></button>
+        <button class="swatch" data-pal="vermillion" title="vermillion — red / amber forward" aria-label="vermillion palette"><span class="dot"></span></button>
       </div>
       <div class="search">🔍<input id="q" placeholder="search findings, paths, ATT&CK…">
         <select id="fTool"><option value="">all tools</option></select>
@@ -293,6 +401,31 @@
 /* ============================================================================
    REAL DATA + REAL LOGIC from the shipped dashboard, rendered in the v2 shell.
    ============================================================================ */
+
+/* ---------- PALETTE SWITCHER (chrome-primitive remap only) ----------
+   Applies a saved palette ASAP (before render) to avoid a flash, persists the
+   choice in localStorage, and wires the top-bar swatches. Switching only sets
+   <html data-palette="...">, which remaps LAYER B chrome primitives — severity
+   and confidence MEANING tokens (LAYER A) are untouched, so a CRITICAL stays
+   unmistakably critical and contrast never needs re-auditing per palette. */
+const PALETTES = ["noir","anime-dream","vermillion"];
+const PAL_KEY = "ds.palette";
+function getPalette(){
+  let p;
+  try{ p = localStorage.getItem(PAL_KEY); }catch(e){ p = null; }
+  return PALETTES.includes(p) ? p : "noir";
+}
+function applyPalette(p){
+  if(!PALETTES.includes(p)) p = "noir";
+  document.documentElement.setAttribute("data-palette", p);
+  try{ localStorage.setItem(PAL_KEY, p); }catch(e){/* storage unavailable: still applies for the session */}
+  document.querySelectorAll(".pal .swatch").forEach(b=>{
+    const on = b.dataset.pal===p;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-pressed", on?"true":"false");
+  });
+}
+applyPalette(getPalette()); // apply on load (before first render)
 
 /* ---- tool catalogue (from README) ---- */
 const TOOLS = [
@@ -360,6 +493,18 @@ const SAMPLE = [
   {tool:"agent", check:"realtime.correlated", severity:"critical", title:"suspicious process then connected out", detail:"/tmp/.cache/.x (execution from a staging directory) connected to 23.254.164.123:4444", path:"/tmp/.cache/.x", technique:"T1071", confidence:"high", related:["base: execution from a staging directory","base technique=T1059","dst=23.254.164.123:4444","lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]"]},
   {tool:"agent", check:"realtime.exec", severity:"medium", title:"execution from a staging directory", detail:"/tmp/.cache/.x spawned under a world-writable path", path:"/tmp/.cache/.x", technique:"T1059", confidence:"low", related:["lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]"]},
   {tool:"agent", check:"realtime.bpf", severity:"high", title:"eBPF program loaded by an unrecognized loader", detail:"fn=security_bpf_prog_load loader=/tmp/.cache/.x pid=1337", path:"/tmp/.cache/.x", technique:"T1014", confidence:"medium"},
+
+  /* ---- EVENT-GROUPING demo (#12): EXACT duplicates of two real detections.
+     The loader reloads its eBPF program repeatedly (same check/tool/title), and a
+     spray of decoy-credential write-attempts hits the same honeytoken. These
+     collapse into ONE row each with a "×N" badge; the drawer lists every instance
+     (distinct path / detail / time). Distinct findings above are NEVER merged. */
+  {tool:"agent", check:"realtime.bpf", severity:"high", title:"eBPF program loaded by an unrecognized loader", detail:"fn=security_bpf_prog_load loader=/tmp/.cache/.x pid=1410", path:"/tmp/.cache/.x", technique:"T1014", confidence:"medium", age_seconds:38},
+  {tool:"agent", check:"realtime.bpf", severity:"high", title:"eBPF program loaded by an unrecognized loader", detail:"fn=security_bpf_prog_load loader=/tmp/.cache/.x pid=1455", path:"/tmp/.cache/.x", technique:"T1014", confidence:"medium", age_seconds:12},
+
+  {tool:"credsentinel", check:"honeytoken", severity:"critical", title:"honeytoken write-attempt — decoy credential file modified", detail:"open(O_WRONLY) on a decoy by pid=1337 comm=.x", path:"~/.aws/credentials.bak", technique:"T1552.001", sigma:"lnx_auditd_credsentinel_honeytoken_write", age_seconds:55},
+  {tool:"credsentinel", check:"honeytoken", severity:"critical", title:"honeytoken write-attempt — decoy credential file modified", detail:"open(O_WRONLY) on a decoy by pid=1337 comm=.x", path:"~/.config/gcloud/decoy.json", technique:"T1552.001", sigma:"lnx_auditd_credsentinel_honeytoken_write", age_seconds:30},
+  {tool:"credsentinel", check:"honeytoken", severity:"critical", title:"honeytoken write-attempt — decoy credential file modified", detail:"open(O_WRONLY) on a decoy by pid=1337 comm=.x", path:"~/.kube/decoy-config", technique:"T1552.001", sigma:"lnx_auditd_credsentinel_honeytoken_write", age_seconds:9},
 ];
 
 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
@@ -418,6 +563,38 @@ function feedSort(arr){
     });
   }
   return arr.slice().sort((a,b)=>SEV_ORDER[a.severity]-SEV_ORDER[b.severity] || (a.tool||"").localeCompare(b.tool||""));
+}
+
+/* groupFindings — collapse EXACT-duplicate findings into one representative row.
+   GROUPING KEY = (tool, check, title) joined by NUL. CONSERVATIVE BY DESIGN: only
+   genuinely identical detections collapse; path / detail / time may differ between
+   instances and are preserved on the representative as _instances[] (the drawer
+   lists them). Distinct detections are NEVER merged — overgrouping hides a distinct
+   root cause, the more sinister failure mode (plan #12).
+   The correlated C2 finding (check==="realtime.correlated") is the marquee and is
+   explicitly NEVER grouped away — each gets its own key so it always stands alone.
+   Returns shallow clones carrying {_count, _instances} so DATA is never mutated. */
+function groupFindings(arr){
+  const groups = new Map();   // key -> representative (clone with _count/_instances)
+  const order = [];           // preserve first-seen order for stable rendering
+  for(const f of arr){
+    // never collapse the correlated hero finding — unique key per object
+    const key = (f.check==="realtime.correlated")
+      ? " correlated "+order.length
+      : [f.tool||"", f.check||"", f.title||""].join(" ");
+    let g = groups.get(key);
+    if(!g){
+      g = {...f, _count:1, _instances:[f]};
+      groups.set(key, g);
+      order.push(g);
+    }else{
+      g._count++;
+      g._instances.push(f);
+      // keep the representative's worst severity (defensive — exact dups share it)
+      if((SEV_ORDER[f.severity]??4) < (SEV_ORDER[g.severity]??4)) g.severity = f.severity;
+    }
+  }
+  return order;
 }
 
 /* relTime — only render a time chip when the finding actually has one. No
@@ -509,6 +686,9 @@ function renderHero(){
   // confidence badge (own hue family, never the severity palette)
   const conf = f.confidence ? `<span class="hconf conf-${esc(f.confidence)}" title="correlation confidence">⬡ ${esc(f.confidence)}</span>` : "";
   const corrTag = isCorr ? `<span class="corr">⛓ CORRELATED</span>` : "";
+  // hero severity as a glyph+word chip (grayscale-safe; the red border is the
+  // color channel, this is the redundant non-color channel).
+  const hsev = `<span class="hsev"><span class="gly g-${esc(f.severity)}" aria-hidden="true">${GLY[f.severity]||"·"}</span>${esc((f.severity||"").toUpperCase())}</span>`;
   const att = f.technique ? `<span class="att">${esc(f.technique)}</span>` : "";
 
   /* TODO(collector contract, UI_REFINEMENT_PLAN #4): when the backend surfaces
@@ -532,7 +712,7 @@ function renderHero(){
   hero.innerHTML =
     `<div class="speed"></div><div class="halftone"></div>
      <div class="L">
-       <div class="tagrow"><span class="ent ${ent.key}">${esc(ent.label)}</span>${corrTag}${conf}${att}</div>
+       <div class="tagrow"><span class="ent ${ent.key}">${esc(ent.label)}</span>${hsev}${corrTag}${conf}${att}</div>
        <h1>${esc((f.title||"").toUpperCase())}</h1>
        ${f.detail?`<div class="hdetail">${esc(f.detail)}</div>`:""}
        ${chainHTML}
@@ -548,12 +728,16 @@ function rowHTML(f, i){
   const ent = entity(f);
   const corr = f.check==="realtime.correlated";
   const t = relTime(f);
-  return `<div class="row ${corr?'corr':''}" data-i="${i}" tabindex="-1">
+  // grouped row: carries a "×N" count badge; the drawer lists the N instances.
+  const n = f._count||1;
+  const grouped = n>1;
+  const badge = grouped ? ` <span class="cnt-badge" title="${esc(n)} identical detections">×${esc(n)}</span>` : "";
+  return `<div class="row ${corr?'corr':''} ${grouped?'grp':''}" data-i="${i}" tabindex="0">
     <span class="gly g-${esc(f.severity)}" aria-hidden="true">${GLY[f.severity]||"·"}</span>
     <span class="ent2">${esc(ent.label)}</span>
     <span class="sevc g-${esc(f.severity)}">${esc((f.severity||"").slice(0,4))}</span>
     <span class="tool">${esc(f.tool)}</span>
-    <span class="ti">${corr?'⛓ ':''}${esc(f.title)}</span>
+    <span class="ti">${corr?'⛓ ':''}${esc(f.title)}${badge}</span>
     ${t?`<span class="rtech" title="${esc(t)}">${esc(t)}</span>`:`<span class="rtech">${f.technique?esc(f.technique):'—'}</span>`}
   </div>`;
 }
@@ -567,7 +751,9 @@ function applyFilter(){
     if(q){const hay=(f.title+" "+(f.detail||"")+" "+(f.path||"")+" "+f.check+" "+(f.technique||"")+" "+((f.related||[]).join(" "))).toLowerCase();if(!hay.includes(q))return false;}
     return true;
   });
-  VIEW = feedSort(filtered);
+  // collapse exact duplicates into one representative each, THEN sort. The feed
+  // reads as findings, not log lines; the drawer still exposes every instance.
+  VIEW = feedSort(groupFindings(filtered));
   return VIEW;
 }
 
@@ -594,6 +780,11 @@ function renderTools(){
   $("#tools").innerHTML = TOOLS.map(t=>{
     const c=counts[t.id]; const has=!!c; const clean=!has||c.worst>=2;
     const statusTxt = !has ? "no data" : clean ? `${c.n} info/low` : `${c.n} findings`;
+    // worst-severity glyph on the "attention" status: a grayscale-safe non-color
+    // channel for the tier (◆ crit vs ▲ high), so a tool card reads in grayscale
+    // and never by the red dot alone (a11y #9 — glyph everywhere severity shows).
+    const worstName = has ? (SEV_NAMES.find(k=>SEV_ORDER[k]===c.worst)||"info") : "info";
+    const worstGly = (has && !clean) ? `<span class="gly g-${esc(worstName)}" aria-hidden="true">${GLY[worstName]||"·"}</span> ` : "";
     // liveness line (additive): only when the collector reported a last-seen for
     // this tool. Red + "STALE" when the agent hasn't checked in within threshold.
     const lv=LIVENESS[t.id];
@@ -601,7 +792,7 @@ function renderTools(){
       lv.stale?`STALE — last seen ${esc(humanAge(lv.age_seconds))}`:`last seen ${esc(humanAge(lv.age_seconds))}`}</div>` : "";
     return `<div class="tcard">
       <div class="th"><span class="name">${esc(t.id)}</span>
-        <span class="tstat ${clean?'ok':'bad'}"><span class="d"></span>${clean?'clean':'attention'}</span></div>
+        <span class="tstat ${clean?'ok':'bad'}"><span class="d"></span>${worstGly}${clean?'clean':'attention'}</span></div>
       <div class="job">${esc(t.job)}</div>
       ${seen}
       <div class="foot"><span class="stack">${esc(t.stack)}</span><span style="color:var(--muted)">${esc(statusTxt)}</span></div>
@@ -628,6 +819,19 @@ function openD(f){
   if(f.path) h += `<div class="kv"><div class="k">path</div><div class="v">${esc(f.path)}</div></div>`;
   if(f.technique) h += `<div class="kv"><div class="k">ATT&CK</div><div class="v"><span class="dtag">${esc(f.technique)}</span></div></div>`;
   if(f.sigma) h += `<div class="kv"><div class="k">sigma</div><div class="v"><span class="dtag">σ ${esc(f.sigma)}</span></div></div>`;
+  /* GROUPED finding: this row collapsed N exact duplicates (same tool/check/title).
+     List every instance so a distinct path/detail/time is never hidden by the count. */
+  if(Array.isArray(f._instances) && f._instances.length>1){
+    h += `<div class="sec">${esc(f._instances.length)} grouped instances</div><div class="insts">`+
+         f._instances.map(in_=>{
+           const it = relTime(in_);
+           return `<div class="inst">`+
+             (in_.path?`<div class="ip">${esc(in_.path)}</div>`:`<div class="ip">${esc("—")}</div>`)+
+             (in_.detail?`<div class="id">${esc(in_.detail)}</div>`:"")+
+             (it?`<div class="it">${esc(it)}</div>`:"")+
+           `</div>`;
+         }).join("")+`</div>`;
+  }
   /* TODO(collector contract): if executed/egress/contained fields are ever
      present on a finding, render the status line here. Not fabricated today. */
   if(Array.isArray(f.related)&&f.related.length){
@@ -671,6 +875,11 @@ $("#nav").addEventListener("click",e=>{
   const v=n.dataset.v;
   $("#viewName").textContent = n.textContent.trim().replace(/\d+$/,'').trim();
   Object.entries(PANES).forEach(([k,id])=>{ $("#"+id).hidden = (k!==v); });
+});
+
+/* palette swatches: click to switch + persist (chrome-primitive remap only) */
+document.querySelectorAll(".pal .swatch").forEach(b=>{
+  b.addEventListener("click",()=>applyPalette(b.dataset.pal));
 });
 
 /* ---------- keyboard nav (j/k/↵/esc) ---------- */
