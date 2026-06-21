@@ -3,220 +3,297 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>defensive-suite · collector dashboard</title>
+<title>defensive-suite · console</title>
+<!-- Bizarre Dockyard fonts. The ONLY permitted external resource (no framework,
+     no build, no external CSS/JS) — exactly as in the v2 prototype. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bungee&family=Rubik+Mono+One&family=Zilla+Slab:ital,wght@0,400;0,600;0,700;0,900;1,700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg:#0a0d13; --panel:#11161f; --panel2:#0e131b; --line:#1e2632; --line2:#2a3442;
-    --txt:#e6e9ef; --muted:#8a93a3; --faint:#5b6472;
-    --accent:#33d6c0; --accent2:#7c9cff;
-    --crit:#ff4d5e; --high:#ff894d; --med:#f5c451; --low:#4aa3ff; --info:#7d8794;
-    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --bg:#0c0a14; --panel:#141021; --panel2:#0f0c1a; --raised:#1b1530;
+    --line:#2a2140; --line2:#3a2f55;
+    --txt:#ece8f5; --muted:#9b8fc0; --faint:#6b5f8c;
+    --violet:#a06bd4; --violet2:#c084fc; --cyan:#2dd4d4; --amber:#f5c451;
+    /* hero accent: the ONE saturated red, reserved for the marquee + large type */
+    --crit:#ff4d5e;
+    /* feed severity: DESATURATED steps for small 12-13px chips (no optical vibration).
+       Severity MEANING stays here; the manga primitives can be remapped without re-auditing. */
+    --sev-crit:#d98a93; --sev-high:#cf9c7e; --sev-med:#c9b87a; --sev-low:#7fa6c9; --sev-info:#8a86a0;
+    /* confidence keeps its OWN hue family (cyan→violet→grey), deliberately NOT the
+       severity palette, so a ⬡ confidence badge is never read as a severity. */
+    --conf-high:var(--cyan); --conf-medium:var(--violet2); --conf-low:var(--faint);
+    --disp:'Bungee',sans-serif; --mono1:'Rubik Mono One',monospace;
+    --slab:'Zilla Slab',Georgia,serif; --mono:'JetBrains Mono',monospace;
+    --r:2px;
   }
   *{box-sizing:border-box}
-  html,body{margin:0;background:var(--bg);color:var(--txt);
-    font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    -webkit-font-smoothing:antialiased;font-size:14px;line-height:1.5}
-  a{color:var(--accent2);text-decoration:none}
-  a:hover{text-decoration:underline}
-  .wrap{max-width:1180px;margin:0 auto;padding:28px 20px 64px}
-  code,.mono{font-family:var(--mono)}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font-family:var(--slab);
+    -webkit-font-smoothing:antialiased;font-size:14px;line-height:1.45;overflow:hidden}
+  .mono{font-family:var(--mono)}
+  .shell{display:grid;grid-template-columns:228px 1fr;height:100vh}
 
-  header.top{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:22px}
-  .brand{display:flex;align-items:center;gap:14px}
-  .logo{width:42px;height:42px;border-radius:10px;flex:none;
-    background:radial-gradient(120% 120% at 30% 20%,#1b3a36,#0c1a18);
-    border:1px solid #1f3b37;display:grid;place-items:center}
-  .logo svg{width:24px;height:24px}
-  h1{font-size:20px;margin:0;letter-spacing:.2px}
-  h1 b{color:var(--accent)}
-  .sub{color:var(--muted);font-size:12.5px;margin-top:2px}
-  .posture{display:flex;align-items:center;gap:10px;padding:10px 14px;border:1px solid var(--line2);border-radius:12px;background:var(--panel)}
-  .posture .dot{width:11px;height:11px;border-radius:50%}
-  .posture .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}
-  .posture .val{font-weight:600}
+  /* ---- sidebar: nav + pinned posture + agentd liveness ---- */
+  .side{background:var(--panel2);border-right:1px solid var(--line2);display:flex;flex-direction:column;padding:14px 12px;min-height:0}
+  .brand{display:flex;align-items:center;gap:10px;margin:2px 4px 18px}
+  .brand .mark{width:34px;height:34px;border:2px solid var(--cyan);border-radius:var(--r);display:grid;place-items:center;
+    background:radial-gradient(120% 120% at 30% 20%,#15303a,#0c1a1f);color:var(--cyan);font-family:var(--mono1);font-size:13px}
+  .brand b{font-family:var(--disp);font-size:14px;letter-spacing:.5px;line-height:1}
+  .brand span{display:block;font-family:var(--mono);font-size:9px;color:var(--faint);letter-spacing:.15em;margin-top:3px}
+  nav{display:flex;flex-direction:column;gap:3px}
+  .nav{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:var(--r);color:var(--muted);cursor:pointer;
+    font-family:var(--mono);font-size:12px;letter-spacing:.04em;border:1px solid transparent;text-transform:uppercase}
+  .nav:hover{background:var(--raised);color:var(--txt)}
+  .nav.on{background:linear-gradient(90deg,rgba(160,107,212,.22),transparent);color:var(--txt);border-color:var(--line2);box-shadow:inset 2px 0 0 var(--violet2)}
+  .nav .ic{width:7px;height:7px;border-radius:50%;background:currentColor;opacity:.8}
+  .nav .cnt{margin-left:auto;color:var(--sev-crit);font-family:var(--disp);font-size:10px}
+  .side .grow{flex:1}
+  .pin{border-top:1px solid var(--line);padding-top:12px;margin-top:8px;display:flex;flex-direction:column;gap:9px}
+  /* posture absorbs the "clean run" KPI. Colour set live from worst severity. */
+  .posture{border-radius:var(--r);padding:9px 11px;border:1px solid var(--line2);background:var(--raised)}
+  .posture.bad{background:rgba(255,77,94,.08);border-color:var(--crit)}
+  .posture .p{font-family:var(--disp);font-size:14px}
+  .posture.bad .p{color:var(--crit)}
+  .posture.ok .p{color:var(--cyan)}
+  .posture .why{font-family:var(--mono);font-size:9.5px;color:var(--muted);margin-top:3px}
+  .stat{display:flex;align-items:center;justify-content:space-between;font-family:var(--mono);font-size:11px}
+  .stat .lbl{color:var(--faint);text-transform:uppercase;letter-spacing:.1em;font-size:9.5px}
+  .live{display:inline-flex;align-items:center;gap:6px;color:var(--cyan)}
+  .live .d{width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 8px var(--cyan)}
+  .live.stale{color:var(--crit)} .live.stale .d{background:var(--crit);box-shadow:0 0 8px var(--crit)}
+  .live.off{color:var(--faint)} .live.off .d{background:var(--faint);box-shadow:none}
+  .kbd{font-family:var(--mono);font-size:9px;color:var(--faint);text-align:center;margin-top:4px}
+  .kbd b{color:var(--muted);background:var(--raised);border:1px solid var(--line2);border-radius:2px;padding:0 4px}
 
-  .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:22px}
-  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 14px}
-  .kpi .n{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
-  .kpi .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-top:2px}
-  .kpi.sev .n{display:flex;align-items:baseline;gap:7px}
-  .kpi .bar{height:3px;border-radius:3px;margin-top:9px;background:var(--line2)}
+  .main{display:flex;flex-direction:column;min-width:0;height:100vh}
+  .top{height:52px;flex:none;border-bottom:1px solid var(--line2);display:flex;align-items:center;gap:14px;padding:0 18px;background:var(--panel2)}
+  .top .view{font-family:var(--disp);font-size:15px;letter-spacing:.5px}
+  .banner{font-family:var(--mono);font-size:10px;color:var(--faint);display:flex;align-items:center;gap:8px}
+  .banner b{color:var(--amber)}
+  .banner .ld{font-family:var(--mono);font-size:10px;color:var(--muted);border:1px solid var(--line2);background:var(--panel);border-radius:var(--r);padding:4px 8px;cursor:pointer}
+  .banner .ld:hover{border-color:var(--cyan);color:var(--txt)}
+  .search{margin-left:auto;display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r);padding:7px 11px;min-width:230px}
+  .search input{background:none;border:0;color:var(--txt);font-family:var(--mono);font-size:12px;outline:none;width:100%}
+  .search select{background:var(--panel2);border:1px solid var(--line2);color:var(--muted);font-family:var(--mono);font-size:11px;border-radius:var(--r);padding:4px 6px;outline:none}
 
-  h2.section{font-size:12px;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);
-    margin:30px 0 12px;display:flex;align-items:center;gap:10px}
-  h2.section::after{content:"";flex:1;height:1px;background:var(--line)}
+  /* a "view" is one nav route. Overview is the no-page-scroll grid; the others
+     are their own views, not stacked. Only the active one is in flow. */
+  .view-pane{flex:1;min-height:0;overflow:hidden}
+  .view-pane[hidden]{display:none}
 
-  .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
-  select,input[type=search]{background:var(--panel2);color:var(--txt);border:1px solid var(--line2);
-    border-radius:9px;padding:8px 11px;font-size:13px;font-family:inherit}
-  input[type=search]{min-width:220px;flex:1}
-  select:focus,input:focus{outline:none;border-color:var(--accent)}
-  .btn{background:var(--panel2);color:var(--txt);border:1px solid var(--line2);border-radius:9px;
-    padding:8px 12px;font-size:12.5px;cursor:pointer}
-  .btn:hover{border-color:var(--accent)}
+  /* Overview: fixed rows; ONLY the feed scrolls internally. */
+  #v-overview{padding:16px 18px;display:grid;grid-template-rows:auto auto 1fr;gap:14px}
 
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  thead th{position:sticky;top:0;text-align:left;color:var(--muted);font-weight:600;font-size:11px;
-    text-transform:uppercase;letter-spacing:.08em;padding:9px 10px;background:var(--panel2);
-    border-bottom:1px solid var(--line2)}
-  tbody td{padding:10px;border-bottom:1px solid var(--line);vertical-align:top}
-  tbody tr:hover{background:#0e141d}
-  .findings{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}
-  .scroll{max-height:520px;overflow:auto}
-  td.path{color:var(--muted);font-family:var(--mono);font-size:12px;word-break:break-all;max-width:260px}
-  td.title{max-width:420px}
-  td.title .det{color:var(--faint);font-size:12px;margin-top:3px}
+  .kpis{display:flex;gap:10px}
+  .kpi{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:9px 13px;display:flex;align-items:baseline;gap:9px}
+  .kpi .n{font-family:var(--disp);font-size:19px;line-height:1;font-variant-numeric:tabular-nums}
+  .kpi .k{font-family:var(--mono);font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
 
-  .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:11px;
-    font-weight:600;white-space:nowrap}
-  .pill .d{width:7px;height:7px;border-radius:50%}
-  .sev-critical{color:var(--crit);background:rgba(255,77,94,.12)} .sev-critical .d{background:var(--crit)}
-  .sev-high{color:var(--high);background:rgba(255,137,77,.12)} .sev-high .d{background:var(--high)}
-  .sev-medium{color:var(--med);background:rgba(245,196,81,.12)} .sev-medium .d{background:var(--med)}
-  .sev-low{color:var(--low);background:rgba(74,163,255,.12)} .sev-low .d{background:var(--low)}
-  .sev-info{color:var(--info);background:rgba(125,135,148,.12)} .sev-info .d{background:var(--info)}
-  .tag{font-family:var(--mono);font-size:11px;color:var(--accent2);background:rgba(124,156,255,.1);
-    border:1px solid rgba(124,156,255,.2);border-radius:6px;padding:1px 6px;white-space:nowrap}
-  .empty{padding:34px;text-align:center;color:var(--muted)}
+  /* ---- evidential HERO (all manga ink concentrated here) ---- */
+  .hero{position:relative;border:2px solid var(--crit);border-radius:var(--r);overflow:hidden;background:var(--panel);display:grid;grid-template-columns:1fr 240px;min-height:0}
+  .hero.calm{border-color:var(--line2)}
+  .hero .speed{position:absolute;inset:0;opacity:.5;pointer-events:none;background:repeating-conic-gradient(from 0deg at 80% 50%, rgba(255,77,94,.16) 0deg 1.4deg, transparent 1.4deg 4deg)}
+  .hero.calm .speed{display:none}
+  .hero .halftone{position:absolute;inset:0;opacity:.10;pointer-events:none;background-image:radial-gradient(var(--crit) 1px, transparent 1.4px);background-size:7px 7px}
+  .hero.calm .halftone{display:none}
+  .hero .L{position:relative;padding:15px 18px;display:flex;flex-direction:column;gap:8px;min-width:0}
+  .tagrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .ent{font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.06em;padding:2px 7px;border-radius:var(--r);background:var(--raised);border:1px solid var(--line2);color:var(--muted)}
+  .ent.net{color:var(--cyan);border-color:rgba(45,212,212,.4)}
+  .ent.proc{color:var(--violet2);border-color:rgba(192,132,252,.4)}
+  .ent.file{color:var(--amber);border-color:rgba(245,196,81,.4)}
+  .ent.host{color:var(--muted)}
+  .corr{font-family:var(--mono1);font-size:9px;color:#1a0008;background:var(--crit);padding:3px 8px;border-radius:var(--r)}
+  .att{font-family:var(--mono);font-size:10px;color:var(--violet2);border:1px solid var(--line2);border-radius:var(--r);padding:2px 7px}
+  .hconf{font-family:var(--mono);font-size:9.5px;font-weight:700;border-radius:999px;padding:1px 8px;text-transform:uppercase}
+  .hconf.conf-high{color:var(--conf-high);border:1px solid var(--conf-high)}
+  .hconf.conf-medium{color:var(--conf-medium);border:1px solid var(--conf-medium)}
+  .hconf.conf-low{color:var(--conf-low);border:1px solid var(--line2)}
+  .hero h1{font-family:var(--disp);font-size:23px;line-height:1.05;margin:1px 0 0}
+  .hero.calm h1{font-size:18px}
+  .hdetail{font-family:var(--mono);font-size:11px;color:var(--muted);word-break:break-word}
+  /* kill chain rendered from the REAL lineage[] / dst */
+  .chain{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:auto}
+  .node{font-family:var(--mono);font-size:11px;padding:6px 9px;border:1px solid var(--line2);border-radius:var(--r);background:var(--panel2);white-space:nowrap}
+  .node b{color:var(--txt)} .node .id{color:var(--faint)}
+  .arr{font-family:var(--mono1);font-size:11px;color:var(--crit)}
+  .node.egress{border-color:var(--crit);color:var(--crit);background:rgba(255,77,94,.1);box-shadow:0 0 16px rgba(255,77,94,.35);animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 0 10px rgba(255,77,94,.25)}50%{box-shadow:0 0 22px rgba(255,77,94,.55)}}
+  .acts{display:flex;gap:8px;margin-top:9px;align-items:center;flex-wrap:wrap}
+  .btn{font-family:var(--mono);font-size:11px;border-radius:var(--r);padding:7px 13px;cursor:pointer;border:1px solid var(--line2);background:var(--raised);color:var(--txt)}
+  .btn:hover{border-color:var(--cyan)}
+  .btn.go{background:var(--cyan);color:#062826;border:0;font-weight:700}
+  .btn.danger{border-color:var(--crit);color:var(--crit)}
+  .acts .hint{margin-left:auto;align-self:center;font-family:var(--mono);font-size:10px;color:var(--faint)}
+  .hero .R{position:relative;display:grid;place-items:center;border-left:1px solid var(--line2)}
+  .hero.calm .R{display:none}
+  .onom{font-family:var(--mono1);color:var(--amber);font-size:38px;line-height:.9;text-align:center;transform:rotate(-8deg);text-shadow:3px 3px 0 var(--crit),6px 6px 0 rgba(0,0,0,.4)}
 
-  /* correlation layer: a confidence badge + the exec→egress lineage on a finding.
-     Only correlated / real-time (agent) findings carry these; the scheduled
-     detectors report without them, so this markup is purely additive. */
-  .conf{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;
-    padding:1px 7px;border-radius:999px;text-transform:uppercase;letter-spacing:.05em;margin-left:7px;vertical-align:middle}
-  /* confidence uses its OWN hue family (teal→periwinkle→grey), deliberately NOT
-     the severity palette (red/orange/yellow/blue), so a ⬡ confidence badge is
-     never confused with a severity pill. */
-  .conf-high{color:var(--accent);background:rgba(51,214,192,.16);border:1px solid rgba(51,214,192,.42)}
-  .conf-medium{color:var(--accent2);background:rgba(124,156,255,.1);border:1px solid rgba(124,156,255,.32)}
-  .conf-low{color:var(--faint);background:rgba(125,135,148,.07);border:1px solid var(--line2)}
-  .lineage{margin-top:6px;display:flex;flex-direction:column;gap:2px}
-  .lineage .rl{font-family:var(--mono);font-size:11px;color:var(--muted)}
-  .lineage .rl::before{content:"↳ ";color:var(--faint)}
-  .lineage .rl.chain{color:var(--accent2)}
-  tr.correlated td{background:linear-gradient(90deg,rgba(255,77,94,.07),transparent 55%)}
-  tr.correlated:hover td{background:linear-gradient(90deg,rgba(255,77,94,.1),#0e141d 55%)}
-  tr.correlated td:first-child{box-shadow:inset 3px 0 0 var(--crit)}
-  .corrtag{font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.06em;color:var(--crit);
-    background:rgba(255,77,94,.12);border:1px solid rgba(255,77,94,.32);border-radius:5px;padding:1px 6px;
-    text-transform:uppercase;white-space:nowrap}
+  /* ---- feed: sober, recency-first, entity + glyph + time ---- */
+  .feed{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);min-height:0;display:flex;flex-direction:column;overflow:hidden}
+  .feed .h{flex:none;display:flex;align-items:center;justify-content:space-between;padding:8px 13px;border-bottom:1px solid var(--line2)}
+  .feed .h b{font-family:var(--disp);font-size:11px;letter-spacing:.5px}
+  .feed .h span{font-family:var(--mono);font-size:10px;color:var(--faint)}
+  .rows{overflow:auto;min-height:0}
+  .row{display:grid;grid-template-columns:18px 42px 60px 96px 1fr 64px;gap:9px;align-items:center;padding:8px 13px;border-bottom:1px solid var(--line);cursor:pointer}
+  .row:hover,.row.sel{background:var(--raised)} .row.sel{box-shadow:inset 2px 0 0 var(--violet2)}
+  .gly{font-size:12px;text-align:center}
+  .g-critical{color:var(--sev-crit)} .g-high{color:var(--sev-high)} .g-medium{color:var(--sev-med)} .g-low{color:var(--sev-low)} .g-info{color:var(--sev-info)}
+  .ent2{font-family:var(--mono);font-size:8.5px;font-weight:700;color:var(--muted);text-align:center;border:1px solid var(--line2);border-radius:2px;padding:2px 0}
+  .sevc{font-family:var(--mono);font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.03em}
+  .row .tool{font-family:var(--mono);font-size:11px;color:var(--violet2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .ti{font-family:var(--slab);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .rtech{justify-self:end;color:var(--violet2);font-family:var(--mono);font-size:9.5px;white-space:nowrap}
+  .row.corr{box-shadow:inset 3px 0 0 var(--crit)}
+  .feed .empty{padding:34px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
 
+  /* ---- Tools view ---- */
+  #v-tools,#v-threats{padding:16px 18px;overflow:auto}
   .tools{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-  .tcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;
-    display:flex;flex-direction:column;gap:8px}
-  .tcard .h{display:flex;align-items:center;justify-content:space-between;gap:8px}
-  .tcard .name{font-family:var(--mono);font-weight:600}
-  .tcard .job{color:var(--muted);font-size:12.5px;min-height:34px}
-  .tcard .stack{font-size:11px;color:var(--faint)}
-  .tcard .foot{display:flex;align-items:center;justify-content:space-between;margin-top:4px;
-    padding-top:9px;border-top:1px solid var(--line)}
-  .stat{display:inline-flex;align-items:center;gap:6px;font-size:11.5px}
-  .stat .d{width:8px;height:8px;border-radius:50%}
-  .ok{color:var(--accent)} .ok .d{background:var(--accent)}
-  .bad{color:var(--crit)} .bad .d{background:var(--crit)}
-  /* agentd liveness: an unobtrusive "last seen" line on a tool card, red+STALE
-     when the collector hasn't heard from the agent within the threshold. */
-  .seen{font-size:11px;color:var(--faint);display:inline-flex;align-items:center;gap:5px}
-  .seen .ld{width:6px;height:6px;border-radius:50%;background:var(--accent)}
-  .seen.stale{color:var(--crit);font-weight:600}
+  .tcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px;display:flex;flex-direction:column;gap:8px}
+  .tcard .th{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .tcard .name{font-family:var(--mono);font-weight:700;color:var(--txt)}
+  .tcard .job{color:var(--muted);font-size:12.5px;min-height:34px;font-family:var(--slab)}
+  .tcard .stack{font-size:11px;color:var(--faint);font-family:var(--mono)}
+  .tcard .foot{display:flex;align-items:center;justify-content:space-between;margin-top:4px;padding-top:9px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11.5px}
+  .tstat{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11.5px}
+  .tstat .d{width:8px;height:8px;border-radius:50%}
+  .tstat.ok{color:var(--cyan)} .tstat.ok .d{background:var(--cyan)}
+  .tstat.bad{color:var(--crit)} .tstat.bad .d{background:var(--crit)}
+  /* agentd per-tool liveness (additive): only when the collector reported last-seen. */
+  .seen{font-size:11px;color:var(--faint);display:inline-flex;align-items:center;gap:5px;font-family:var(--mono)}
+  .seen .ld{width:6px;height:6px;border-radius:50%;background:var(--cyan)}
+  .seen.stale{color:var(--crit);font-weight:700}
   .seen.stale .ld{background:var(--crit)}
 
+  /* ---- Threat model view ---- */
   .threats{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
-  .threat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 14px}
-  .threat .t{font-weight:600;margin-bottom:3px}
+  .threat{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:13px 14px}
+  .threat .t{font-weight:700;margin-bottom:3px;font-family:var(--slab)}
   .threat .desc{color:var(--muted);font-size:12.5px;margin-bottom:9px}
   .threat .by{display:flex;gap:6px;flex-wrap:wrap}
-  .chip{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:6px;
-    background:rgba(51,214,192,.08);color:var(--accent);border:1px solid rgba(51,214,192,.22)}
+  .chip{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:var(--r);background:rgba(45,212,212,.08);color:var(--cyan);border:1px solid rgba(45,212,212,.22)}
+  .note{display:flex;gap:12px;background:linear-gradient(180deg,#14132a,#0f0c1a);border:1px solid var(--line2);border-radius:var(--r);padding:15px 16px;color:var(--muted);font-size:13px;margin-top:14px;font-family:var(--slab)}
+  .note b{color:var(--cyan)}
+  .sect{font-family:var(--mono);font-size:10px;color:var(--violet2);text-transform:uppercase;letter-spacing:.12em;margin:0 0 12px;display:flex;align-items:center;gap:10px}
+  .sect::after{content:"";flex:1;height:1px;background:var(--line)}
 
-  .note{display:flex;gap:12px;background:linear-gradient(180deg,#10171a,#0c1115);
-    border:1px solid #1c3a36;border-radius:12px;padding:15px 16px;color:#cfe9e4;font-size:13px}
-  .note b{color:var(--accent)}
-  .banner{font-size:12px;color:var(--muted);background:var(--panel2);border:1px dashed var(--line2);
-    border-radius:10px;padding:9px 12px;margin-bottom:18px;display:flex;gap:9px;align-items:center;flex-wrap:wrap}
-  footer{margin-top:40px;color:var(--faint);font-size:12px;border-top:1px solid var(--line);padding-top:16px;
-    display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
-  @media(max-width:880px){.kpis{grid-template-columns:repeat(3,1fr)}.tools,.threats{grid-template-columns:1fr}}
+  /* ---- detail drawer ---- */
+  .scrim{position:fixed;inset:0;background:rgba(6,4,12,.55);opacity:0;pointer-events:none;transition:opacity .2s}
+  .scrim.open{opacity:1;pointer-events:auto}
+  .drawer{position:fixed;top:0;right:0;height:100vh;width:430px;max-width:92vw;background:var(--panel);border-left:2px solid var(--violet2);transform:translateX(100%);transition:transform .26s cubic-bezier(.2,.7,.2,1);z-index:10;display:flex;flex-direction:column}
+  .drawer.open{transform:none}
+  .drawer .dh{padding:14px 17px;border-bottom:1px solid var(--line2);display:flex;align-items:flex-start;gap:10px}
+  .drawer .dh h3{font-family:var(--disp);font-size:14px;margin:4px 0 0;line-height:1.1}
+  .drawer .x{margin-left:auto;cursor:pointer;color:var(--faint);font-family:var(--mono);font-size:18px;background:none;border:0}
+  .drawer .db{padding:14px 17px;overflow:auto;display:flex;flex-direction:column;gap:13px}
+  .kv .k{color:var(--faint);text-transform:uppercase;font-size:9.5px;letter-spacing:.1em;margin-bottom:3px;font-family:var(--mono)}
+  .kv .v{color:var(--txt);word-break:break-all;font-family:var(--mono);font-size:12px}
+  .dconf{display:inline-block;font-family:var(--mono);font-size:9.5px;font-weight:700;border-radius:999px;padding:1px 8px;text-transform:uppercase}
+  .dconf.conf-high{color:var(--conf-high);border:1px solid var(--conf-high)}
+  .dconf.conf-medium{color:var(--conf-medium);border:1px solid var(--conf-medium)}
+  .dconf.conf-low{color:var(--conf-low);border:1px solid var(--line2)}
+  .dtag{font-family:var(--mono);font-size:11px;color:var(--cyan);background:rgba(45,212,212,.08);border:1px solid rgba(45,212,212,.22);border-radius:var(--r);padding:1px 6px}
+  .sec{font-family:var(--mono);font-size:10px;color:var(--violet2);text-transform:uppercase;letter-spacing:.12em;border-bottom:1px solid var(--line);padding-bottom:5px}
+  .lin .step{font-family:var(--mono);font-size:11px;color:var(--muted);padding:1px 0;word-break:break-all} .lin .step::before{content:"↳ ";color:var(--faint)}
+  .lin .step.chain{color:var(--violet2)}
+  .drawer .acts{margin-top:2px}
+
+  /* respect reduced motion */
+  @media (prefers-reduced-motion: reduce){
+    .node.egress{animation:none} .drawer{transition:none} .scrim{transition:none}
+  }
+  @media(max-width:880px){.tools{grid-template-columns:1fr}.threats{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="shell">
+  <aside class="side">
+    <div class="brand"><div class="mark">DS</div><div><b>DEFENSIVE</b><span>SUITE · CONSOLE</span></div></div>
+    <nav id="nav">
+      <div class="nav on" data-v="overview"><span class="ic"></span>Overview</div>
+      <div class="nav" data-v="findings"><span class="ic"></span>Findings <span class="cnt" id="navCount">0</span></div>
+      <div class="nav" data-v="tools"><span class="ic"></span>Tools</div>
+      <div class="nav" data-v="threats"><span class="ic"></span>Threat Model</div>
+    </nav>
+    <div class="grow"></div>
+    <div class="pin">
+      <!-- posture: driven by worst current finding (absorbs the "clean run" KPI) -->
+      <div class="posture" id="posture"><div class="p" id="postureVal">—</div><div class="why" id="postureWhy">—</div></div>
+      <!-- agentd liveness: hidden until the collector reports a last-seen for the
+           real-time agent; turns red / STALE when the agent stops checking in. -->
+      <div class="stat" id="agentLive" style="display:none"><span class="lbl">agentd</span><span class="live" id="agentLiveBadge"><span class="d"></span><span id="agentLiveVal">—</span></span></div>
+      <div class="kbd"><b>j</b> <b>k</b> move · <b>↵</b> open · <b>esc</b> close</div>
+    </div>
+  </aside>
 
-  <header class="top">
-    <div class="brand">
-      <div class="logo" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="#33d6c0" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round">
-          <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z"/>
-          <path d="M9 12l2 2 4-4"/>
-        </svg>
+  <main class="main">
+    <div class="top">
+      <div class="view" id="viewName">Overview</div>
+      <!-- live/sample data banner state (preserved from the real dashboard) -->
+      <div class="banner">
+        <span>▟ <b id="dataState">sample</b> data</span>
+        <label class="ld" style="cursor:pointer">load report JSON<input id="file" type="file" accept="application/json,.json" hidden multiple></label>
+        <button class="ld" id="reset">reset</button>
       </div>
-      <div>
-        <h1><b>defensive</b>-suite <span style="color:var(--faint);font-weight:400">· collector</span></h1>
-        <div class="sub">Six composable tools for the Linux-workstation threat cluster — poisoned dep → credential theft → eBPF rootkit.</div>
+      <div class="search">🔍<input id="q" placeholder="search findings, paths, ATT&CK…">
+        <select id="fTool"><option value="">all tools</option></select>
+        <select id="fSev"><option value="">all sev</option><option value="critical">crit</option><option value="high">high</option><option value="medium">med</option><option value="low">low</option><option value="info">info</option></select>
       </div>
     </div>
-    <div class="posture" id="posture">
-      <span class="dot" id="postureDot"></span>
-      <div><div class="lbl">posture</div><div class="val" id="postureVal">—</div></div>
-    </div>
-    <!-- agentd liveness: hidden until the collector reports a last-seen for the
-         real-time agent; turns red / STALE when the agent stops checking in. -->
-    <div class="posture" id="agentLive" style="display:none">
-      <span class="dot" id="agentLiveDot"></span>
-      <div><div class="lbl">agentd</div><div class="val" id="agentLiveVal" style="font-size:13px">—</div></div>
-    </div>
-  </header>
 
-  <div class="banner">
-    <span>▟ Showing <b style="color:var(--txt)">sample</b> collector data.</span>
-    <span>Drop in real output of <code>&lt;tool&gt; check --format json</code> to render live findings →</span>
-    <label class="btn" style="cursor:pointer">Load report JSON<input id="file" type="file" accept="application/json,.json" hidden multiple></label>
-    <button class="btn" id="reset">Reset to sample</button>
-  </div>
+    <!-- ===== OVERVIEW (no page-scroll; only the feed scrolls) ===== -->
+    <section class="view-pane" id="v-overview">
+      <div class="kpis" id="kpis"></div>
+      <section class="hero" id="hero"></section>
+      <div class="feed">
+        <div class="h"><b>LIVE FEED</b><span id="feedMeta">recency-first · ↵ for detail</span></div>
+        <div class="rows" id="rows"></div>
+      </div>
+    </section>
 
-  <div class="kpis" id="kpis"></div>
+    <!-- ===== FINDINGS (full feed, own view) ===== -->
+    <section class="view-pane" id="v-findings" hidden>
+      <div class="feed" style="margin:16px 18px;height:calc(100vh - 52px - 32px)">
+        <div class="h"><b>ALL FINDINGS</b><span id="findingsMeta"></span></div>
+        <div class="rows" id="rowsAll"></div>
+      </div>
+    </section>
 
-  <h2 class="section">findings</h2>
-  <div class="toolbar">
-    <input id="q" type="search" placeholder="Search title, path, check, technique…">
-    <select id="fTool"><option value="">All tools</option></select>
-    <select id="fSev">
-      <option value="">All severities</option>
-      <option value="critical">Critical</option><option value="high">High</option>
-      <option value="medium">Medium</option><option value="low">Low</option><option value="info">Info</option>
-    </select>
-    <select id="fTech"><option value="">All techniques</option></select>
-    <span id="count" style="color:var(--muted);font-size:12px;margin-left:auto"></span>
-  </div>
-  <div class="findings"><div class="scroll"><table>
-    <thead><tr><th>Severity</th><th>Tool</th><th>Check</th><th>Finding</th><th>Path</th><th>ATT&CK</th></tr></thead>
-    <tbody id="rows"></tbody>
-  </table></div></div>
+    <!-- ===== TOOLS ===== -->
+    <section class="view-pane" id="v-tools" hidden>
+      <h2 class="sect">tools</h2>
+      <div class="tools" id="tools"></div>
+    </section>
 
-  <h2 class="section">tools</h2>
-  <div class="tools" id="tools"></div>
-
-  <h2 class="section">threat model → defense</h2>
-  <div class="threats" id="threats"></div>
-
-  <h2 class="section">architecture principle</h2>
-  <div class="note">
-    <span>◆</span>
-    <div>At least one detection path must <b>not</b> run on the potentially-compromised kernel. A live host with an
-    eBPF rootkit lies to <code>ps</code>, <code>ss</code>, <code>bpftool</code> and every eBPF-based EDR — so
-    <code>bpfsentry</code> adds early-boot baselining and offline memory forensics, and any divergence between the live
-    <code>bpftool</code> view and the memory-dump <code>prog_idr</code> walk is itself proof of a <code>sys_bpf</code>-hooking
-    implant. Trust anchors (AIDE DBs, baselines, BPF allowlists) live <b>off-host</b>, writable but not readable by the
-    monitored machine.</div>
-  </div>
-
-  <footer>
-    <span>defensive-suite · dashboard is a static, dependency-free single file</span>
-    <span><a href="https://github.com/mtclinton/defensive-suite">github.com/mtclinton/defensive-suite</a></span>
-  </footer>
+    <!-- ===== THREAT MODEL ===== -->
+    <section class="view-pane" id="v-threats" hidden>
+      <h2 class="sect">threat model → defense</h2>
+      <div class="threats" id="threats"></div>
+      <div class="note">
+        <span>◆</span>
+        <div>At least one detection path must <b>not</b> run on the potentially-compromised kernel. A live host with an
+        eBPF rootkit lies to <code>ps</code>, <code>ss</code>, <code>bpftool</code> and every eBPF-based EDR — so
+        <code>bpfsentry</code> adds early-boot baselining and offline memory forensics, and any divergence between the live
+        <code>bpftool</code> view and the memory-dump <code>prog_idr</code> walk is itself proof of a <code>sys_bpf</code>-hooking
+        implant. Trust anchors (AIDE DBs, baselines, BPF allowlists) live <b>off-host</b>, writable but not readable by the
+        monitored machine.</div>
+      </div>
+    </section>
+  </main>
 </div>
 
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="dh"><div><div class="sec" style="border:0;padding:0" id="dCheck">—</div><h3 id="dTitle">—</h3></div><button class="x" id="dx" aria-label="close">✕</button></div>
+  <div class="db" id="db"></div>
+</aside>
+
 <script>
+/* ============================================================================
+   REAL DATA + REAL LOGIC from the shipped dashboard, rendered in the v2 shell.
+   ============================================================================ */
+
 /* ---- tool catalogue (from README) ---- */
 const TOOLS = [
   {id:"authwatch",   job:"Auth-stack & persistence integrity (PAM / OpenSSH / authorized_keys / ld.so.preload)", stack:"Go + AIDE + auditd"},
@@ -240,7 +317,12 @@ const THREATS = [
   {t:"Secret / credential exposure", d:"Private-CISA GitHub leak — long-lived credentials at rest in dotfiles / repos.", by:["credsentinel"]},
 ];
 
-/* ---- sample collector findings (schema matches each tool's check --format json) ---- */
+/* ---- sample collector findings (schema matches each tool's check --format json) ----
+   Schema: {tool, check, severity, title, detail, path, technique, sigma, confidence, related[]}.
+   NOTE (honesty): the schema has NO dwell-time and NO executed/egress/contained
+   state. The hero/drawer render only what's here (lineage / dst / confidence /
+   ATT&CK). The dwell-time + containment stamp from the v2 mock are deliberately
+   NOT fabricated — see the TODO where they would go. */
 const SAMPLE = [
   {tool:"authwatch", check:"pam", severity:"critical", title:"unowned PAM module — no package provides it", detail:"a security .so installed outside the package manager is a high-confidence PAM backdoor", path:"/usr/lib64/security/pam_exec2.so", technique:"T1556.003", sigma:"lnx_auditd_pam_backdoor"},
   {tool:"authwatch", check:"preload", severity:"critical", title:"ld.so.preload is populated", detail:"/tmp/.lib/hook.so", path:"/etc/ld.so.preload", technique:"T1574.006", sigma:"lnx_auditd_ld_so_preload_mod"},
@@ -281,11 +363,22 @@ const SAMPLE = [
 ];
 
 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
+const SEV_NAMES = ["critical","high","medium","low","info"];
+/* redundant non-colour severity channel: a distinct glyph per tier (a11y #9). */
+const GLY = {critical:"◆", high:"▲", medium:"●", low:"▫", info:"·"};
+
 let DATA = SAMPLE.slice();
 /* agentd liveness, keyed by tool id → {age_seconds, stale, last_seen}. Populated
    from the collector's /api/summary; empty in the static/sample build (no signal,
    so no indicator is shown — purely additive). */
 let LIVENESS = {};
+
+/* ---------- helpers ---------- */
+const $ = s => document.querySelector(s);
+
+/* esc() — XSS escaping applied on EVERY field rendered from finding data. The
+   new markup must not reintroduce holes a prior review fixed. */
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
 /* humanAge renders an age in seconds as a compact "Ns / Nm / Nh ago". */
 function humanAge(sec){
@@ -295,91 +388,313 @@ function humanAge(sec){
   return Math.floor(sec/3600)+"h ago";
 }
 
-/* ---------- rendering ---------- */
-const $ = s => document.querySelector(s);
-const el = (t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;};
-function sevPill(s){const e=esc(s);return `<span class="pill sev-${e}"><span class="d"></span>${e}</span>`;}
+/* entity-type heuristic (DERIVED — not a backend field). Maps a finding to one
+   of NET / PROC / FILE / HOST by check first, then tool. Used for the loud
+   categorical badge in feed + hero + drawer. Returns {key,label}. */
+function entity(f){
+  const c = (f.check||"").toLowerCase();
+  const t = (f.tool||"").toLowerCase();
+  if(c.includes("correlated")||c.includes("egress")||c.includes("triage")||t==="egresswatch") return {key:"net",label:"NET"};
+  if(c.includes("exec")||c.includes("bpf")) return {key:"proc",label:"PROC"};
+  if(c.includes("pam")||c.includes("preload")||c.includes("authkeys")||c.includes("hooks")||c.includes("trufflehog")||c.includes("honeytoken")||c.includes("builtinscan")||c.includes("lockfile")||c.includes("osv")||c.includes("cooldown")||c.includes("pkgverify")) return {key:"file",label:"FILE"};
+  if(c.includes("sysctl")||c.includes("caps")||c.includes("divergence")||c.includes("podman")||c.includes("baseline")||c.includes("status")) return {key:"host",label:"HOST"};
+  // fall back to tool
+  if(t==="egresswatch"||t==="agent") return {key:"net",label:"NET"};
+  if(t==="authwatch"||t==="instguard"||t==="credsentinel") return {key:"file",label:"FILE"};
+  return {key:"host",label:"HOST"};
+}
 
+/* feedSort — RECENCY-FIRST when findings carry a timestamp/age, else WORST-FIRST.
+   CHOICE: the real Finding schema has no timestamp today, so the fallback is
+   severity-then-tool (deterministic, the prior dashboard's order). If a `ts` (ms)
+   or `age_seconds` field is ever surfaced by the collector, newest sorts first. */
+function feedSort(arr){
+  const hasTime = arr.some(f=>f.ts!=null||f.age_seconds!=null);
+  if(hasTime){
+    return arr.slice().sort((a,b)=>{
+      const ta = a.ts!=null?a.ts:(a.age_seconds!=null?-a.age_seconds:0);
+      const tb = b.ts!=null?b.ts:(b.age_seconds!=null?-b.age_seconds:0);
+      return tb-ta;
+    });
+  }
+  return arr.slice().sort((a,b)=>SEV_ORDER[a.severity]-SEV_ORDER[b.severity] || (a.tool||"").localeCompare(b.tool||""));
+}
+
+/* relTime — only render a time chip when the finding actually has one. No
+   fabricated "12s/40s" timestamps. */
+function relTime(f){
+  if(f.age_seconds!=null) return humanAge(f.age_seconds);
+  if(f.ts!=null){ const s=Math.max(0,Math.floor((Date.now()-f.ts)/1000)); return humanAge(s); }
+  return "";
+}
+
+/* ---------- KPIs + posture ---------- */
 function renderKpis(){
   const by={critical:0,high:0,medium:0,low:0,info:0};
   DATA.forEach(f=>by[f.severity]=(by[f.severity]||0)+1);
   const worst = DATA.reduce((w,f)=>Math.min(w,SEV_ORDER[f.severity]??4),4);
   const clean = worst>=2; // clean = nothing >= medium
-  const worstName = Object.keys(SEV_ORDER).find(k=>SEV_ORDER[k]===worst)||"info";
-  $("#postureVal").textContent = clean ? "CLEAN" : worstName.toUpperCase();
-  $("#postureDot").style.background = clean ? "var(--accent)" : `var(--${worstName==="critical"?"crit":worstName==="high"?"high":"med"})`;
-  const sev=(k,col)=>`<div class="kpi sev"><div class="n" style="color:var(--${col})">${by[k]||0}</div><div class="k">${k}</div><div class="bar" style="background:var(--${col});opacity:${by[k]?.5:.12}"></div></div>`;
+  const worstName = SEV_NAMES.find(k=>SEV_ORDER[k]===worst)||"info";
+  const corr = DATA.find(f=>f.check==="realtime.correlated");
+  const activeIncidents = DATA.filter(f=>f.check==="realtime.correlated").length;
+  const liveTools = Object.keys(LIVENESS).length;
+
+  // posture (absorbs the clean-run KPI)
+  const pBox=$("#posture"), pVal=$("#postureVal"), pWhy=$("#postureWhy");
+  pBox.classList.toggle("bad", !clean);
+  pBox.classList.toggle("ok", clean);
+  if(clean){ pVal.textContent="✓ CLEAN"; pWhy.textContent="nothing ≥ medium"; }
+  else { pVal.textContent=(worstName==="critical"?"⚠ CRITICAL":worstName.toUpperCase());
+         pWhy.textContent = corr ? "active C2 · lineage below" : (by.critical+" critical · "+by.high+" high"); }
+
+  const kpi=(n,k,col)=>`<div class="kpi"><span class="n"${col?` style="color:${col}"`:""}>${n}</span><span class="k">${k}</span></div>`;
   $("#kpis").innerHTML =
-    `<div class="kpi"><div class="n">${DATA.length}</div><div class="k">findings</div><div class="bar"></div></div>`+
-    sev("critical","crit")+sev("high","high")+sev("medium","med")+sev("low","low")+
-    `<div class="kpi"><div class="n" style="color:${clean?'var(--accent)':'var(--crit)'}">${clean?'✓':'✗'}</div><div class="k">clean run</div><div class="bar" style="background:${clean?'var(--accent)':'var(--crit)'};opacity:.5"></div></div>`;
+    kpi(activeIncidents,"active incident",activeIncidents?"var(--crit)":"var(--cyan)")+
+    kpi(DATA.length,"findings","")+
+    kpi(by.critical||0,"critical","var(--sev-crit)")+
+    kpi(liveTools,"tools live","var(--cyan)");
+  $("#navCount").textContent = DATA.length;
+}
+
+/* ---------- HERO (evidential, derived from the REAL correlated finding) ---------- */
+function renderHero(){
+  const hero=$("#hero");
+  // The marquee is the DATA item with check=="realtime.correlated". If none, fall
+  // back to the worst current finding, else a calm "no active incident" state.
+  let f = DATA.find(x=>x.check==="realtime.correlated");
+  let mode = f ? "corr" : "";
+  if(!f){
+    const sorted = DATA.slice().sort((a,b)=>SEV_ORDER[a.severity]-SEV_ORDER[b.severity]);
+    f = sorted[0];
+  }
+  if(!f){ // truly empty
+    hero.className="hero calm";
+    hero.innerHTML=`<div class="L"><div class="tagrow"><span class="ent">CLEAR</span></div>
+      <h1>NO ACTIVE INCIDENT</h1><div class="hdetail">No findings to triage.</div></div>`;
+    return;
+  }
+  const ent = entity(f);
+  const isCorr = f.check==="realtime.correlated";
+  const calm = !isCorr && SEV_ORDER[f.severity] >= 1; // anything below high → calm hero
+  hero.className = (isCorr || f.severity==="critical") ? "hero" : "hero calm";
+
+  // Parse the REAL related[] of a correlated finding:
+  //   "dst=23.254.164.123:4444"                         → egress 4-tuple
+  //   "lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]"  → process chain
+  let dst="", lineageRaw="";
+  if(Array.isArray(f.related)){
+    for(const r of f.related){
+      if(/^dst=/.test(r)) dst = r.replace(/^dst=/,"").trim();
+      if(/^lineage:/i.test(r)) lineageRaw = r.replace(/^lineage:\s*/i,"").trim();
+    }
+  }
+
+  // Build the directional chain from the lineage (sshd ← bash ← .x), reversed to
+  // read exec-order (sshd → bash → .x → dst). Each node "name[id]".
+  let chainHTML="";
+  if(lineageRaw){
+    const parts = lineageRaw.split("←").map(s=>s.trim()).filter(Boolean).reverse();
+    const nodes = parts.map(p=>{
+      const m = p.match(/^(.*?)\[(.*?)\]$/);
+      const name = m?m[1].trim():p, id = m?m[2].trim():"";
+      return `<span class="node"><b>${esc(name)}</b>${id?` <span class="id">[${esc(id)}]</span>`:""}</span>`;
+    });
+    const egress = dst ? `<span class="node egress"><b>${esc(dst)}</b></span>` : "";
+    const sep = `<span class="arr">▸</span>`;
+    chainHTML = `<div class="chain">${nodes.join(sep)}${egress?sep+egress:""}</div>`;
+  } else if(dst){
+    chainHTML = `<div class="chain"><span class="node egress"><b>${esc(dst)}</b></span></div>`;
+  }
+
+  // confidence badge (own hue family, never the severity palette)
+  const conf = f.confidence ? `<span class="hconf conf-${esc(f.confidence)}" title="correlation confidence">⬡ ${esc(f.confidence)}</span>` : "";
+  const corrTag = isCorr ? `<span class="corr">⛓ CORRELATED</span>` : "";
+  const att = f.technique ? `<span class="att">${esc(f.technique)}</span>` : "";
+
+  /* TODO(collector contract, UI_REFINEMENT_PLAN #4): when the backend surfaces
+     executed/egress/contained state + exec→egress dwell-time as Finding fields,
+     render a facts line ("executed ✓ · egress ✓ · contained ✗"), per-edge dwell
+     labels on the chain, and the "NOT CONTAINED" / "KILLED" impact-stamp here.
+     These do NOT exist in the schema today and are deliberately NOT fabricated. */
+
+  // response actions — only attached/wired in the Tauri build (see respond IIFE).
+  const acts = isCorr
+    ? `<div class="acts" id="heroActs" style="display:none">
+         <button class="btn go" data-act="isolate" data-tgt="">Isolate egress</button>
+         <button class="btn" data-act="quarantine" data-tgt="${esc(f.path||"")}">Quarantine</button>
+         <button class="btn danger" data-act="kill" data-tgt="">Kill</button>
+         <span class="hint" id="heroActHint">dry-run · audited</span>
+       </div>`
+    : "";
+
+  const onom = isCorr ? `<div class="R"><div class="speed" style="opacity:.22"></div><div class="onom">DODON</div></div>` : "";
+
+  hero.innerHTML =
+    `<div class="speed"></div><div class="halftone"></div>
+     <div class="L">
+       <div class="tagrow"><span class="ent ${ent.key}">${esc(ent.label)}</span>${corrTag}${conf}${att}</div>
+       <h1>${esc((f.title||"").toUpperCase())}</h1>
+       ${f.detail?`<div class="hdetail">${esc(f.detail)}</div>`:""}
+       ${chainHTML}
+       ${acts}
+     </div>${onom}`;
+
+  // stash the correlated finding so the Tauri wiring can target it
+  hero._dst = dst;
+}
+
+/* ---------- FEED ROWS (recency-first, entity + glyph + desat chip + time) ---------- */
+function rowHTML(f, i){
+  const ent = entity(f);
+  const corr = f.check==="realtime.correlated";
+  const t = relTime(f);
+  return `<div class="row ${corr?'corr':''}" data-i="${i}" tabindex="-1">
+    <span class="gly g-${esc(f.severity)}" aria-hidden="true">${GLY[f.severity]||"·"}</span>
+    <span class="ent2">${esc(ent.label)}</span>
+    <span class="sevc g-${esc(f.severity)}">${esc((f.severity||"").slice(0,4))}</span>
+    <span class="tool">${esc(f.tool)}</span>
+    <span class="ti">${corr?'⛓ ':''}${esc(f.title)}</span>
+    ${t?`<span class="rtech" title="${esc(t)}">${esc(t)}</span>`:`<span class="rtech">${f.technique?esc(f.technique):'—'}</span>`}
+  </div>`;
+}
+
+let VIEW = []; // current filtered+sorted DATA, index-aligned with rendered rows
+function applyFilter(){
+  const q=($("#q").value||"").toLowerCase(), ft=$("#fTool").value, fs=$("#fSev").value;
+  const filtered = DATA.filter(f=>{
+    if(ft&&f.tool!==ft)return false;
+    if(fs&&f.severity!==fs)return false;
+    if(q){const hay=(f.title+" "+(f.detail||"")+" "+(f.path||"")+" "+f.check+" "+(f.technique||"")+" "+((f.related||[]).join(" "))).toLowerCase();if(!hay.includes(q))return false;}
+    return true;
+  });
+  VIEW = feedSort(filtered);
+  return VIEW;
+}
+
+function renderRows(){
+  const rows = applyFilter();
+  const html = rows.length ? rows.map((f,i)=>rowHTML(f,i)).join("")
+                           : `<div class="empty">No findings match the filters.</div>`;
+  $("#rows").innerHTML = html;
+  $("#rowsAll").innerHTML = html;
+  $("#feedMeta").textContent = (feedSort(rows).some(f=>f.ts!=null||f.age_seconds!=null)?"recency-first":"worst-first")+" · "+rows.length+" of "+DATA.length+" · ↵ for detail";
+  $("#findingsMeta").textContent = rows.length+" of "+DATA.length;
+  sel=-1;
 }
 
 function populateFilters(){
   const tools=[...new Set(DATA.map(f=>f.tool))].sort();
-  $("#fTool").innerHTML = `<option value="">All tools</option>`+tools.map(t=>`<option>${esc(t)}</option>`).join("");
-  const tech=[...new Set(DATA.map(f=>f.technique).filter(Boolean))].sort();
-  $("#fTech").innerHTML = `<option value="">All techniques</option>`+tech.map(t=>`<option>${esc(t)}</option>`).join("");
+  const cur=$("#fTool").value;
+  $("#fTool").innerHTML = `<option value="">all tools</option>`+tools.map(t=>`<option${t===cur?' selected':''}>${esc(t)}</option>`).join("");
 }
 
-function renderRows(){
-  const q=$("#q").value.toLowerCase(), ft=$("#fTool").value, fs=$("#fSev").value, fx=$("#fTech").value;
-  const rows = DATA.filter(f=>{
-    if(ft&&f.tool!==ft)return false; if(fs&&f.severity!==fs)return false; if(fx&&f.technique!==fx)return false;
-    if(q){const hay=(f.title+" "+(f.detail||"")+" "+(f.path||"")+" "+f.check+" "+(f.technique||"")+" "+((f.related||[]).join(" "))).toLowerCase();if(!hay.includes(q))return false;}
-    return true;
-  }).sort((a,b)=>SEV_ORDER[a.severity]-SEV_ORDER[b.severity] || a.tool.localeCompare(b.tool));
-  $("#count").textContent = `${rows.length} of ${DATA.length}`;
-  const tb=$("#rows"); tb.innerHTML="";
-  if(!rows.length){tb.innerHTML=`<tr><td colspan="6"><div class="empty">No findings match the filters.</div></td></tr>`;return;}
-  for(const f of rows){
-    const corr = f.check==="realtime.correlated";
-    const tr=el("tr", corr?"correlated":"");
-    const conf = f.confidence?` <span class="conf conf-${esc(f.confidence)}" title="correlation confidence">⬡ ${esc(f.confidence)}</span>`:"";
-    const lineage = (Array.isArray(f.related)&&f.related.length)
-      ? `<div class="lineage">${f.related.map(r=>`<div class="rl${/^lineage:/.test(r)?" chain":""}">${esc(r)}</div>`).join("")}</div>`
-      : "";
-    tr.innerHTML =
-      `<td>${sevPill(f.severity)}</td>`+
-      `<td><span class="mono">${esc(f.tool)}</span></td>`+
-      `<td><span class="mono" style="color:var(--muted)">${esc(f.check)}</span></td>`+
-      `<td class="title">${corr?`<span class="corrtag">⛓ correlated</span> `:""}${esc(f.title)}${conf}${f.detail?`<div class="det mono">${esc(f.detail)}</div>`:""}${f.sigma?` <span class="tag">σ ${esc(f.sigma)}</span>`:""}${lineage}</td>`+
-      `<td class="path">${f.path?esc(f.path):"—"}</td>`+
-      `<td>${f.technique?`<span class="tag">${esc(f.technique)}</span>`:"—"}</td>`;
-    tb.appendChild(tr);
-  }
-}
-
+/* ---------- TOOLS view (agentd liveness wired in) ---------- */
 function renderTools(){
   const counts={}; DATA.forEach(f=>{(counts[f.tool]=counts[f.tool]||{n:0,worst:4}); counts[f.tool].n++; counts[f.tool].worst=Math.min(counts[f.tool].worst,SEV_ORDER[f.severity]);});
   $("#tools").innerHTML = TOOLS.map(t=>{
     const c=counts[t.id]; const has=!!c; const clean=!has||c.worst>=2;
     const statusTxt = !has ? "no data" : clean ? `${c.n} info/low` : `${c.n} findings`;
-    // Liveness line (additive): only when the collector reported a last-seen for
+    // liveness line (additive): only when the collector reported a last-seen for
     // this tool. Red + "STALE" when the agent hasn't checked in within threshold.
     const lv=LIVENESS[t.id];
     const seen = lv ? `<div class="seen${lv.stale?' stale':''}"><span class="ld"></span>${
-      lv.stale?`STALE — last seen ${humanAge(lv.age_seconds)}`:`last seen ${humanAge(lv.age_seconds)}`}</div>` : "";
+      lv.stale?`STALE — last seen ${esc(humanAge(lv.age_seconds))}`:`last seen ${esc(humanAge(lv.age_seconds))}`}</div>` : "";
     return `<div class="tcard">
-      <div class="h"><span class="name">${t.id}</span>
-        <span class="stat ${clean?'ok':'bad'}"><span class="d"></span>${clean?'clean':'attention'}</span></div>
-      <div class="job">${t.job}</div>
+      <div class="th"><span class="name">${esc(t.id)}</span>
+        <span class="tstat ${clean?'ok':'bad'}"><span class="d"></span>${clean?'clean':'attention'}</span></div>
+      <div class="job">${esc(t.job)}</div>
       ${seen}
-      <div class="foot"><span class="stack">${t.stack}</span><span style="color:var(--muted);font-size:11.5px">${statusTxt}</span></div>
+      <div class="foot"><span class="stack">${esc(t.stack)}</span><span style="color:var(--muted)">${esc(statusTxt)}</span></div>
     </div>`;}).join("");
 }
 
 function renderThreats(){
   $("#threats").innerHTML = THREATS.map(x=>`<div class="threat">
-    <div class="t">${x.t}</div><div class="desc">${x.d}</div>
-    <div class="by">${x.by.map(b=>`<span class="chip">${b}</span>`).join("")}</div></div>`).join("");
+    <div class="t">${esc(x.t)}</div><div class="desc">${esc(x.d)}</div>
+    <div class="by">${x.by.map(b=>`<span class="chip">${esc(b)}</span>`).join("")}</div></div>`).join("");
 }
 
-function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function renderAll(){renderKpis();renderHero();populateFilters();renderRows();renderTools();renderThreats();syncHeroActs();}
 
-function renderAll(){renderKpis();populateFilters();renderRows();renderTools();renderThreats();}
+/* ---------- DRAWER (progressive disclosure: lineage/related live here) ---------- */
+function openD(f){
+  if(!f) return;
+  const ent = entity(f);
+  $("#dCheck").textContent = f.check;
+  $("#dTitle").textContent = f.title;
+  let h = `<div class="kv"><div class="k">detail</div><div class="v">${f.detail?esc(f.detail):"—"}</div></div>`;
+  h += `<div class="kv"><div class="k">entity · tool · severity</div><div class="v">${esc(ent.label)} · ${esc(f.tool)} · ${esc(f.severity)}`+
+       (f.confidence?` · <span class="dconf conf-${esc(f.confidence)}">⬡ ${esc(f.confidence)}</span>`:"")+`</div></div>`;
+  if(f.path) h += `<div class="kv"><div class="k">path</div><div class="v">${esc(f.path)}</div></div>`;
+  if(f.technique) h += `<div class="kv"><div class="k">ATT&CK</div><div class="v"><span class="dtag">${esc(f.technique)}</span></div></div>`;
+  if(f.sigma) h += `<div class="kv"><div class="k">sigma</div><div class="v"><span class="dtag">σ ${esc(f.sigma)}</span></div></div>`;
+  /* TODO(collector contract): if executed/egress/contained fields are ever
+     present on a finding, render the status line here. Not fabricated today. */
+  if(Array.isArray(f.related)&&f.related.length){
+    h += `<div class="sec">exec → egress lineage</div><div class="lin">`+
+         f.related.map(r=>`<div class="step${/^lineage:/i.test(r)?" chain":""}">${esc(r)}</div>`).join("")+`</div>`;
+  }
+  // response actions — only inserted/wired in the Tauri build.
+  if(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke){
+    let dst="";
+    if(Array.isArray(f.related)) for(const r of f.related){ if(/^dst=/.test(r)) dst=r.replace(/^dst=/,"").trim(); }
+    h += `<div class="sec">respond <span style="color:var(--faint)">(dry-run · audited)</span></div>
+      <div class="acts" id="drawerActs">
+        <button class="btn go" data-act="isolate" data-tgt="${esc(dst)}">Isolate</button>
+        <button class="btn" data-act="quarantine" data-tgt="${esc(f.path||"")}">Quarantine</button>
+        <button class="btn danger" data-act="kill" data-tgt="">Kill</button>
+      </div>`;
+  }
+  $("#db").innerHTML = h;
+  $("#scrim").classList.add("open");
+  $("#drawer").classList.add("open");
+  $("#drawer").setAttribute("aria-hidden","false");
+}
+function closeD(){
+  $("#scrim").classList.remove("open");
+  $("#drawer").classList.remove("open");
+  $("#drawer").setAttribute("aria-hidden","true");
+}
+function rowFinding(rowEl){ return VIEW[+rowEl.dataset.i]; }
 
-/* ---------- live report loading ---------- */
+document.querySelectorAll("#rows,#rowsAll").forEach(c=>{
+  c.addEventListener("click",e=>{const r=e.target.closest(".row");if(r)openD(rowFinding(r));});
+});
+$("#dx").onclick = closeD;
+$("#scrim").onclick = closeD;
+
+/* ---------- nav (views, not stacked) ---------- */
+const PANES = {overview:"v-overview",findings:"v-findings",tools:"v-tools",threats:"v-threats"};
+$("#nav").addEventListener("click",e=>{
+  const n=e.target.closest(".nav"); if(!n)return;
+  document.querySelectorAll(".nav").forEach(x=>x.classList.remove("on")); n.classList.add("on");
+  const v=n.dataset.v;
+  $("#viewName").textContent = n.textContent.trim().replace(/\d+$/,'').trim();
+  Object.entries(PANES).forEach(([k,id])=>{ $("#"+id).hidden = (k!==v); });
+});
+
+/* ---------- keyboard nav (j/k/↵/esc) ---------- */
+let sel=-1;
+function activeRows(){
+  // operate on whichever feed is visible (Overview or Findings)
+  const id = $("#v-findings").hidden ? "#rows" : "#rowsAll";
+  const useId = $("#v-overview").hidden ? "#rowsAll" : "#rows";
+  return [...document.querySelectorAll(useId+" .row")];
+}
+function mark(R){R.forEach((r,i)=>r.classList.toggle('sel',i===sel));}
+document.addEventListener('keydown',e=>{
+  if(e.target && (e.target.tagName==="INPUT"||e.target.tagName==="SELECT")){
+    if(e.key==='Escape') e.target.blur();
+    return;
+  }
+  if(e.key==='Escape'){ closeD(); return; }
+  const R=activeRows(); if(!R.length) return;
+  if(e.key==='j'){ sel=Math.min(sel+1,R.length-1); mark(R); R[sel].scrollIntoView({block:'nearest'}); }
+  if(e.key==='k'){ sel=Math.max(sel-1,0); mark(R); R[sel].scrollIntoView({block:'nearest'}); }
+  if(e.key==='Enter'&&sel>=0) openD(VIEW[+R[sel].dataset.i]);
+});
+
+/* ---------- live report loading (file ingest) ---------- */
 function ingest(obj){
   // accepts a single Report {tool,findings:[...]} or an array of them, or a bare findings array
   const out=[];
@@ -394,11 +709,10 @@ $("#file").addEventListener("change",async e=>{
   const files=[...e.target.files]; if(!files.length)return;
   const all=[];
   for(const file of files){try{all.push(...ingest(JSON.parse(await file.text())));}catch(err){alert("Could not parse "+file.name+": "+err.message);}}
-  if(all.length){DATA=all;$("#q").value="";$("#fTool").value="";$("#fSev").value="";$("#fTech").value="";renderAll();
-    document.querySelector(".banner span b").textContent="live";}
+  if(all.length){DATA=all;$("#q").value="";$("#fTool").value="";$("#fSev").value="";renderAll();$("#dataState").textContent="live (file)";}
 });
-$("#reset").addEventListener("click",()=>{DATA=SAMPLE.slice();renderAll();document.querySelector(".banner span b").textContent="sample";});
-["q","fTool","fSev","fTech"].forEach(id=>$("#"+id).addEventListener("input",renderRows));
+$("#reset").addEventListener("click",()=>{DATA=SAMPLE.slice();renderAll();$("#dataState").textContent="sample";});
+["q","fTool","fSev"].forEach(id=>$("#"+id).addEventListener("input",renderRows));
 
 renderAll();
 
@@ -413,7 +727,7 @@ const BASES=["", "http://127.0.0.1:8787/", "http://localhost:8787/"];
       const res=await fetch(b+"api/findings",{cache:"no-store"});
       if(!res.ok) continue;
       const live=ingest(await res.json());
-      if(live.length){DATA=live;document.querySelector(".banner b").textContent="live";renderAll();return;}
+      if(live.length){DATA=live;$("#dataState").textContent="live";renderAll();return;}
     }catch(e){/* try next source */}
   }
 })();
@@ -427,17 +741,18 @@ function applyLiveness(sum){
   const map={};
   for(const ts of sum.tools){ if(ts&&ts.tool) map[ts.tool]=ts; }
   LIVENESS=map;
-  // Dedicated agentd badge in the header (the real-time agent posts as tool "agent").
-  const a=map["agent"], box=$("#agentLive");
+  // Dedicated agentd badge in the sidebar (the real-time agent posts as tool "agent").
+  const a=map["agent"], box=$("#agentLive"), badge=$("#agentLiveBadge");
   if(a){
     box.style.display="";
-    $("#agentLiveVal").textContent = (a.stale?"STALE · ":"")+"last seen "+humanAge(a.age_seconds);
-    $("#agentLiveDot").style.background = a.stale ? "var(--crit)" : "var(--accent)";
-    $("#agentLiveVal").style.color = a.stale ? "var(--crit)" : "var(--txt)";
+    $("#agentLiveVal").textContent = (a.stale?"STALE · ":"live · ")+humanAge(a.age_seconds);
+    badge.classList.toggle("stale", !!a.stale);
+    badge.classList.toggle("off", false);
   }else{
     box.style.display="none";
   }
   renderTools();
+  renderKpis(); // tools-live KPI depends on LIVENESS
 }
 async function loadLiveness(){
   for(const b of BASES){
@@ -453,53 +768,54 @@ async function loadLiveness(){
 loadLiveness();
 setInterval(loadLiveness, 15000);
 
-/* --- M3 manual-response panel (Tauri desktop app ONLY) ---
-   The browser / GitHub-Pages build has no Tauri IPC, so this stays hidden there.
-   In the console it calls the `respond` Rust command, which holds the response
-   token and proxies to the collector's audited POST /api/respond. Every action
-   is dry-run unless agentd response is explicitly enabled. */
-(function(){
+/* --- M3 manual-response (Tauri desktop app ONLY) ---
+   The browser / GitHub-Pages build has no Tauri IPC, so no response UI is wired
+   and no respond calls are possible there. In the console it calls the `respond`
+   Rust command, which holds the response token and proxies to the collector's
+   audited POST /api/respond. Every action is dry-run unless agentd response is
+   explicitly enabled.
+
+   The hero + drawer carry guarded respond buttons (data-act/data-tgt); they are
+   only revealed and wired here, behind the window.__TAURI__ guard. */
+function runRespond(action, target, reason, out){
   var T=window.__TAURI__;
   if(!T||!T.core||!T.core.invoke) return;
-  var invoke=T.core.invoke;
-  var style=document.createElement("style");
-  style.textContent=
-    "#respbar{position:fixed;left:0;right:0;bottom:0;z-index:9999;display:flex;gap:8px;align-items:center;"+
-    "padding:8px 12px;background:#0d1117f2;border-top:1px solid #243244;backdrop-filter:blur(4px);"+
-    "font:13px system-ui,sans-serif;color:#cdd9e5}"+
-    "#respbar select,#respbar input{background:#161b22;color:#cdd9e5;border:1px solid #2a3441;border-radius:6px;padding:5px 8px}"+
-    "#respbar input{flex:1;min-width:60px}"+
-    "#respbar button{background:#33d6c0;color:#06231f;border:0;border-radius:6px;padding:6px 14px;font-weight:600;cursor:pointer}"+
-    "#respbar #rb-out{flex:2;min-width:80px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
-  document.head.appendChild(style);
-  var bar=document.createElement("div");
-  bar.id="respbar";
-  bar.innerHTML=
-    '<strong>Respond</strong>'+
-    '<select id="rb-action">'+
-      '<option value="kill">kill (PID)</option>'+
-      '<option value="isolate">isolate (iface)</option>'+
-      '<option value="quarantine">quarantine (path)</option>'+
-      '<option value="revoke-key">revoke-key (authorized_keys)</option>'+
-      '<option value="block-hash">block-hash (sha256)</option>'+
-    '</select>'+
-    '<input id="rb-target" placeholder="target (PID / iface / path / sha256)" />'+
-    '<input id="rb-reason" placeholder="reason (audited)" />'+
-    '<button id="rb-run">Run</button>'+
-    '<span id="rb-out"></span>';
-  document.body.appendChild(bar);
-  var out=bar.querySelector("#rb-out");
-  bar.querySelector("#rb-run").addEventListener("click",async function(){
-    var action=bar.querySelector("#rb-action").value;
-    var target=bar.querySelector("#rb-target").value.trim();
-    var reason=bar.querySelector("#rb-reason").value.trim();
-    if(!target){out.textContent="enter a target";return;}
-    if(!window.confirm("Send "+action+' on "'+target+'"?\n(dry-run unless agentd response is enabled)')) return;
-    out.textContent="working…";
-    try{
-      var res=await invoke("respond",{action:action,target:target,reason:reason});
-      out.textContent=(res.dry_run?"[DRY-RUN] ":"")+(res.ok?"✓ ":"✗ ")+(res.detail||JSON.stringify(res));
-    }catch(e){ out.textContent="error: "+e; }
+  if(!target){ if(out) out.textContent="enter a target"; return; }
+  if(!window.confirm("Send "+action+' on "'+target+'"?\n(dry-run unless agentd response is enabled)')) return;
+  if(out) out.textContent="working…";
+  T.core.invoke("respond",{action:action,target:target,reason:reason||""}).then(function(res){
+    if(out) out.textContent=(res.dry_run?"[DRY-RUN] ":"")+(res.ok?"✓ ":"✗ ")+(res.detail||JSON.stringify(res));
+  }).catch(function(e){ if(out) out.textContent="error: "+e; });
+}
+
+// reveal the hero respond actions only in the Tauri build, and target them at
+// the live correlated finding's dst / pid where derivable.
+function syncHeroActs(){
+  var T=window.__TAURI__;
+  var acts=$("#heroActs");
+  if(!acts) return;
+  if(!(T&&T.core&&T.core.invoke)){ acts.style.display="none"; return; }
+  acts.style.display="";
+  var hero=$("#hero");
+  acts.querySelectorAll("button[data-act]").forEach(function(btn){
+    if(btn.dataset.act==="isolate") btn.dataset.tgt = hero._dst||"";
+  });
+}
+
+(function(){
+  var T=window.__TAURI__;
+  if(!T||!T.core||!T.core.invoke) return; // plain browser: no respond UI/calls at all
+  // delegated handler covers both the hero and the drawer respond buttons.
+  document.addEventListener("click",function(e){
+    var btn=e.target.closest && e.target.closest("button[data-act]");
+    if(!btn) return;
+    var action=btn.dataset.act;
+    var target=(btn.dataset.tgt||"").trim();
+    // prompt for an empty target (e.g. kill needs a PID the finding may not carry)
+    if(!target){ target=(window.prompt("target for "+action+" (PID / iface / path / sha256):","")||"").trim(); if(!target) return; }
+    var reason=(window.prompt("reason (audited):","manual response from console")||"").trim();
+    var out=$("#heroActHint");
+    runRespond(action,target,reason,out);
   });
 })();
 </script>
