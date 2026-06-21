@@ -52,10 +52,18 @@ func (g Guards) Validate(req Request) error {
 		return g.validateIsolate(req)
 	case ActionQuarantine:
 		return g.validateQuarantine(req)
+	case ActionQuarantineFD:
+		return g.validateQuarantineFD(req)
 	case ActionRevokeKey:
 		return g.validateRevokeKey(req)
 	case ActionBlockHash:
 		return g.validateBlockHash(req)
+	case ActionUnquarantine:
+		return g.validateUnquarantine(req)
+	case ActionDeIsolate:
+		return g.validateDeIsolate(req)
+	case ActionRestoreKey:
+		return g.validateRestoreKey(req)
 	default:
 		return fmt.Errorf("unknown action %q", req.Action)
 	}
@@ -143,6 +151,113 @@ func (g Guards) validateBlockHash(req Request) error {
 		return fmt.Errorf("block-hash: target %q is not a 64-hex sha256", req.Target)
 	}
 	return nil
+}
+
+// validateQuarantineFD: the identity-bound, fd-based quarantine (§3.2/§4.2). The
+// Request carries the captured live identity (pid + starttime + uid + exec_id)
+// and the StagingDir residency constraint; the EXECUTOR re-resolves /proc and
+// acts by fd. Validate is the pure pre-check: a numeric live pid, a non-empty
+// staging-dir constraint, and (defence-in-depth) the captured exe path — when
+// present — must NOT be under a CriticalPaths denylist entry. The real residency
+// + identity bind happens at execute time against live /proc (a lexical path here
+// is never trusted as the target).
+func (g Guards) validateQuarantineFD(req Request) error {
+	pidStr := strings.TrimSpace(req.Target)
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		return fmt.Errorf("quarantine-fd: target %q is not a numeric pid", req.Target)
+	}
+	if pid <= 1 {
+		return fmt.Errorf("quarantine-fd: refusing pid %d (<=1: init/kernel)", pid)
+	}
+	if strings.TrimSpace(req.arg("starttime")) == "" {
+		return fmt.Errorf("quarantine-fd: missing required \"starttime\" identity arg")
+	}
+	staging := splitArgList(req.arg("staging_dirs"))
+	if len(staging) == 0 {
+		return fmt.Errorf("quarantine-fd: missing required \"staging_dirs\" residency constraint")
+	}
+	// Defence-in-depth: if a captured exe path is supplied, refuse it lexically if
+	// it falls under a critical denylist entry (the executor re-resolves /proc and
+	// re-checks staging residency by fd; this is only a backstop).
+	if exe := strings.TrimSpace(req.arg("exe")); exe != "" && path.IsAbs(exe) {
+		clean := path.Clean(exe)
+		if seg := firstSegment(clean); strings.HasPrefix(seg, "lib") {
+			return fmt.Errorf("quarantine-fd: refusing captured exe %q under critical path /lib*", exe)
+		}
+		for _, c := range g.CriticalPaths {
+			if pathUnder(clean, c) {
+				return fmt.Errorf("quarantine-fd: refusing captured exe %q under critical path %q", exe, c)
+			}
+		}
+	}
+	return nil
+}
+
+// validateUnquarantine: the §4.6 reverse of quarantine. Target is the
+// quarantine-DST (the moved-aside file); it MUST be under the quarantine dir so
+// an attacker cannot use unquarantine to chattr -i / mv an arbitrary file. The
+// "origin" arg is the absolute path to restore to.
+func (g Guards) validateUnquarantine(req Request) error {
+	dst := strings.TrimSpace(req.Target)
+	if dst == "" {
+		return fmt.Errorf("unquarantine: target (quarantine-dst) path is empty")
+	}
+	if !path.IsAbs(dst) {
+		return fmt.Errorf("unquarantine: target %q must be an absolute path", dst)
+	}
+	qdir := strings.TrimSpace(g.QuarantineDir)
+	if qdir == "" {
+		qdir = DefaultGuards().QuarantineDir
+	}
+	if !pathUnder(path.Clean(dst), qdir) {
+		return fmt.Errorf("unquarantine: refusing %q — not under the quarantine dir %q", dst, qdir)
+	}
+	origin := strings.TrimSpace(req.arg("origin"))
+	if origin == "" {
+		return fmt.Errorf("unquarantine: missing required \"origin\" arg (where to restore the file)")
+	}
+	if !path.IsAbs(origin) {
+		return fmt.Errorf("unquarantine: origin %q must be an absolute path", origin)
+	}
+	// The restore target must itself be a permitted quarantine target (so undo
+	// cannot write a file back into a critical path). Reuse the quarantine guard on
+	// the origin path.
+	return g.validateQuarantine(Request{Action: ActionQuarantine, Target: origin})
+}
+
+// validateDeIsolate: the §4.6 reverse of isolate (nft delete the isolation
+// table). It is inherently safe — RESTORING egress can never self-lock-out — so
+// it has no target requirement.
+func (g Guards) validateDeIsolate(req Request) error {
+	return nil
+}
+
+// validateRestoreKey: the §4.6 reverse of revoke-key. Target must be an
+// authorized_keys path (validated exactly like revoke-key, minus the fingerprint:
+// restore brings the whole file back from its backup).
+func (g Guards) validateRestoreKey(req Request) error {
+	target := strings.TrimSpace(req.Target)
+	if target == "" {
+		return fmt.Errorf("restore-key: target path is empty")
+	}
+	base := path.Base(target)
+	if base != "authorized_keys" && base != "authorized_keys2" {
+		return fmt.Errorf("restore-key: target %q is not an authorized_keys file", target)
+	}
+	return nil
+}
+
+// splitArgList splits a comma-separated Args value into trimmed, non-empty
+// entries (used for quarantine-fd's "staging_dirs" constraint).
+func splitArgList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // pathUnder reports whether clean (an already path.Clean'd absolute path) is at

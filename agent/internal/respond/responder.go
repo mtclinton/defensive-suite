@@ -132,8 +132,16 @@ func (rl *rateLimiter) allow(now time.Time) bool {
 // Respond validates, audits, and (unless dry-run) executes req. It never returns
 // an error: a refusal or executor failure is reported as a Result with OK=false
 // and a Detail, so the HTTP layer can always render a Result to the operator.
+//
+// §4.4 per-action arming: the effective dry-run mode is req.DryRun when the
+// request sets it, else the Responder-level r.DryRun. The brake order is
+// UNCHANGED — Validate → kill-switch → rate-limit → audit → execute — and a
+// per-action-LIVE request still passes through every brake (the kill-switch and
+// rate-limit both apply to it). When req.DryRun is unset (the manual socket never
+// sets it) behaviour is byte-for-byte identical to before.
 func (r *Responder) Respond(req Request) Result {
 	now := r.clock()
+	dryRun := req.dryRun(r.DryRun)
 
 	// 1. Guardrails (pure). A refusal is audited as a failed result and returned;
 	//    the executor is never reached.
@@ -142,10 +150,10 @@ func (r *Responder) Respond(req Request) Result {
 			OK:     false,
 			Action: req.Action,
 			Target: req.Target,
-			DryRun: r.DryRun,
+			DryRun: dryRun,
 			Detail: "refused: " + err.Error(),
 		}
-		_ = r.Audit.Intent(now, req, r.DryRun)
+		_ = r.Audit.Intent(now, req, dryRun)
 		_ = r.Audit.Result(now, req, res)
 		return res
 	}
@@ -154,10 +162,11 @@ func (r *Responder) Respond(req Request) Result {
 	//    REFUSE the action regardless of DryRun — an operator can `touch` it to
 	//    instantly disable ALL response without restarting agentd. Checked on every
 	//    request, BEFORE the intent audit, so the refusal is what gets recorded and
-	//    the executor is never reached even when live.
+	//    the executor is never reached even when live. The §4.4 per-action-live path
+	//    is NOT exempt: a per-Request live action is still refused here.
 	if r.KillSwitchPath != "" && r.fileExists != nil && r.fileExists(r.KillSwitchPath) {
-		res := r.refuse(req, fmt.Sprintf("response globally disabled (kill-switch %s)", r.KillSwitchPath))
-		_ = r.Audit.Intent(now, req, r.DryRun)
+		res := r.refuse(req, dryRun, fmt.Sprintf("response globally disabled (kill-switch %s)", r.KillSwitchPath))
+		_ = r.Audit.Intent(now, req, dryRun)
 		_ = r.Audit.Result(now, req, res)
 		return res
 	}
@@ -166,18 +175,20 @@ func (r *Responder) Respond(req Request) Result {
 	//    become a rapid mass-kill / mass-isolate DoS. Dry-run is FREE (never
 	//    counted) — only the live path consumes from the limiter. Refused requests
 	//    do not consume budget, so a blocked storm cannot extend its own lockout.
-	if !r.DryRun && r.rate != nil && !r.rate.allow(now) {
-		res := r.refuse(req, fmt.Sprintf("rate limit exceeded (%d per %s)", r.rate.max, r.rate.window))
-		_ = r.Audit.Intent(now, req, r.DryRun)
+	//    The §4.4 per-action-live path consumes the SAME limiter (the only shared
+	//    mutable in respond/), so a per-action-live action is rate-limited too.
+	if !dryRun && r.rate != nil && !r.rate.allow(now) {
+		res := r.refuse(req, dryRun, fmt.Sprintf("rate limit exceeded (%d per %s)", r.rate.max, r.rate.window))
+		_ = r.Audit.Intent(now, req, dryRun)
 		_ = r.Audit.Result(now, req, res)
 		return res
 	}
 
 	// 4. Audit the intent BEFORE doing anything.
-	_ = r.Audit.Intent(now, req, r.DryRun)
+	_ = r.Audit.Intent(now, req, dryRun)
 
 	// 5. Dry-run: return the planned action and audit it. Execute is NOT called.
-	if r.DryRun {
+	if dryRun {
 		res := Result{
 			OK:     true,
 			Action: req.Action,
@@ -206,13 +217,14 @@ func (r *Responder) Respond(req Request) Result {
 }
 
 // refuse builds a not-OK Result for a brake (kill-switch / rate limit) refusal,
-// preserving the responder's DryRun flag so the audit reflects the live/dry mode.
-func (r *Responder) refuse(req Request, detail string) Result {
+// carrying the EFFECTIVE dry-run flag (§4.4) so the audit reflects the live/dry
+// mode the request would have run in.
+func (r *Responder) refuse(req Request, dryRun bool, detail string) Result {
 	return Result{
 		OK:     false,
 		Action: req.Action,
 		Target: req.Target,
-		DryRun: r.DryRun,
+		DryRun: dryRun,
 		Detail: detail,
 	}
 }
@@ -235,10 +247,18 @@ func planned(req Request) string {
 		return "install nftables egress-drop except interface " + req.Target
 	case ActionQuarantine:
 		return "move " + req.Target + " to the quarantine dir (chattr +i, chmod 000)"
+	case ActionQuarantineFD:
+		return "identity-bind to the live process, then quarantine its open exe BY FD (O_NOFOLLOW)"
 	case ActionRevokeKey:
 		return "remove the authorized_keys line matching fingerprint from " + req.Target
 	case ActionBlockHash:
 		return "add a fapolicyd deny rule for sha256 " + req.Target
+	case ActionUnquarantine:
+		return "chattr -i " + req.Target + " && mv it back to " + req.arg("origin")
+	case ActionDeIsolate:
+		return "nft delete table inet dsuite_isolate (lift the egress isolation)"
+	case ActionRestoreKey:
+		return "restore " + req.Target + " from its .dsuite.bak backup"
 	default:
 		return req.String()
 	}
@@ -252,12 +272,18 @@ func plannedUndo(req Request) string {
 		return "" // irreversible
 	case ActionIsolate:
 		return "nft delete table inet dsuite_isolate"
-	case ActionQuarantine:
-		return "chattr -i <quarantined> && mv <quarantined> " + req.Target
+	case ActionQuarantine, ActionQuarantineFD:
+		// The structured inverse is an ActionUnquarantine Request (§4.6), not this
+		// free-text string; this string is the human-readable note shown in dry-run.
+		return "chattr -i <quarantined> && mv <quarantined> " + req.Target + " (or: an unquarantine Request)"
 	case ActionRevokeKey:
-		return "restore " + req.Target + " from its .dsuite.bak backup"
+		return "restore " + req.Target + " from its .dsuite.bak backup (or: a restore-key Request)"
 	case ActionBlockHash:
 		return "remove the fapolicyd deny rule and reload"
+	case ActionUnquarantine, ActionDeIsolate, ActionRestoreKey:
+		// These ARE the inverses; their own undo is to re-apply the forward action,
+		// which is not auto-derivable here.
+		return ""
 	default:
 		return ""
 	}

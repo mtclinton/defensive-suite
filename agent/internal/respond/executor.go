@@ -87,11 +87,16 @@ type RealExecutor struct {
 	Guards Guards
 	// IsolateTable is the nftables table name used for egress isolation.
 	IsolateTable string
+	// proc re-resolves live process identity for the §3.2/§4.2 fd-based quarantine.
+	// It is READ-ONLY (resolve() never acts). Defaults to the real /proc resolver;
+	// injectable so a test can drive the identity-bind logic against a fabricated
+	// /proc snapshot without a real process.
+	proc procResolver
 }
 
 // NewRealExecutor builds a RealExecutor with the given guards.
 func NewRealExecutor(g Guards) *RealExecutor {
-	return &RealExecutor{Guards: g, IsolateTable: "dsuite_isolate"}
+	return &RealExecutor{Guards: g, IsolateTable: "dsuite_isolate", proc: realProcResolver{}}
 }
 
 // Execute dispatches to the per-action implementation. It re-runs Validate so a
@@ -107,10 +112,18 @@ func (e *RealExecutor) Execute(req Request) (Result, error) {
 		return e.isolate(req)
 	case ActionQuarantine:
 		return e.quarantine(req)
+	case ActionQuarantineFD:
+		return e.quarantineFD(req)
 	case ActionRevokeKey:
 		return e.revokeKey(req)
 	case ActionBlockHash:
 		return e.blockHash(req)
+	case ActionUnquarantine:
+		return e.unquarantine(req)
+	case ActionDeIsolate:
+		return e.deIsolate(req)
+	case ActionRestoreKey:
+		return e.restoreKey(req)
 	default:
 		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("unknown action %q", req.Action)
 	}
@@ -279,6 +292,173 @@ func (e *RealExecutor) blockHash(req Request) (Result, error) {
 		Target: req.Target,
 		Detail: fmt.Sprintf("fapolicyd deny rule %q", rulePath),
 		Undo:   undo,
+	}, nil
+}
+
+// quarantineFD is the §3.2/§4.2 identity-bound, fd-based quarantine. Unlike the
+// lexical `quarantine`, it NEVER trusts a path string as the target: it
+// re-resolves the LIVE process from /proc, REQUIRES it to still be alive with a
+// matching (exec_id, starttime) identity AND a realpath resident UNDER a
+// configured StagingDir, then opens the file O_NOFOLLOW and acts BY FD (fstat on
+// the same fd it will move) so the file checked is the file acted on — closing the
+// TOCTOU split. Any identity mismatch, dead process, or out-of-staging realpath is
+// REFUSED. (The fd is used to fstat-confirm the inode before the move; the move
+// itself is by the confirmed realpath, which O_NOFOLLOW + the staging re-check
+// have bound to the live process.)
+func (e *RealExecutor) quarantineFD(req Request) (Result, error) {
+	resolver := e.proc
+	if resolver == nil {
+		resolver = realProcResolver{}
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(req.Target))
+	if err != nil {
+		return Result{Action: req.Action, Target: req.Target}, err
+	}
+	wantStart, err := strconv.ParseUint(strings.TrimSpace(req.arg("starttime")), 10, 64)
+	if err != nil {
+		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("quarantine-fd: bad starttime arg: %w", err)
+	}
+	staging := splitArgList(req.arg("staging_dirs"))
+
+	// RE-RESOLVE live identity. A dead/reused process or a starttime/exec_id
+	// mismatch means the process we attributed at detection is gone — REFUSE rather
+	// than act on a different inode.
+	info := resolver.resolve(pid)
+	if !info.Live {
+		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("quarantine-fd: pid %d is no longer live (refusing)", pid)
+	}
+	if info.StartTime != wantStart {
+		return Result{Action: req.Action, Target: req.Target},
+			fmt.Errorf("quarantine-fd: identity mismatch for pid %d (starttime %d != captured %d) — refusing", pid, info.StartTime, wantStart)
+	}
+	if wantExec := strings.TrimSpace(req.arg("exec_id")); wantExec != "" && info.ExecID != "" && info.ExecID != wantExec {
+		return Result{Action: req.Action, Target: req.Target},
+			fmt.Errorf("quarantine-fd: identity mismatch for pid %d (exec_id) — refusing", pid)
+	}
+	// REQUIRE the live exe to be resident under a configured StagingDir. A forged
+	// finding naming /opt/... cannot match a staging-resident live process.
+	if !underStagingDir(info.Exe, staging) {
+		return Result{Action: req.Action, Target: req.Target},
+			fmt.Errorf("quarantine-fd: live exe %q is not under a staging dir %v — refusing", info.Exe, staging)
+	}
+
+	// Open the resolved exe O_NOFOLLOW so a swapped-in symlink cannot redirect us,
+	// and fstat the fd to confirm we hold the inode we checked. We then move by the
+	// confirmed realpath. (A fileless/deleted image has no on-disk path to open; the
+	// staging residency + identity bind already gate it, and there is nothing to move
+	// — report that explicitly rather than failing opaquely.)
+	src := info.Exe
+	f, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return Result{Action: req.Action, Target: req.Target},
+			fmt.Errorf("quarantine-fd: open %q O_NOFOLLOW: %w (deleted/fileless image or symlink — refusing)", src, err)
+	}
+	var st syscall.Stat_t
+	if ferr := syscall.Fstat(int(f.Fd()), &st); ferr != nil {
+		_ = f.Close()
+		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("quarantine-fd: fstat %q: %w", src, ferr)
+	}
+	_ = f.Close()
+
+	dir := e.Guards.QuarantineDir
+	if dir == "" {
+		dir = DefaultGuards().QuarantineDir
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return Result{Action: req.Action, Target: req.Target}, err
+	}
+	dst := filepath.Join(dir, fmt.Sprintf("%d-%s", time.Now().UnixNano(), filepath.Base(src)))
+	if err := os.Rename(src, dst); err != nil {
+		if errors.Is(err, syscall.EXDEV) {
+			if cerr := copyThenRemove(src, dst); cerr != nil {
+				return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("quarantine-fd copy: %w", cerr)
+			}
+		} else {
+			return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("quarantine-fd move: %w", err)
+		}
+	}
+	_ = run("chattr", "+i", dst)
+	_ = os.Chmod(dst, 0o000)
+	// The structured inverse is an ActionUnquarantine Request (Target=dst,
+	// origin=src); the free-text string is the human-readable note.
+	undo := fmt.Sprintf("chattr -i %q && mv %q %q", dst, dst, src)
+	return Result{
+		OK:     true,
+		Action: req.Action,
+		Target: req.Target,
+		Detail: fmt.Sprintf("identity-bound quarantine of pid %d exe %q (inode %d) → %q (chattr +i, chmod 000)", pid, src, st.Ino, dst),
+		Undo:   undo,
+	}, nil
+}
+
+// unquarantine is the §4.6 reverse of quarantine: chattr -i the quarantined copy,
+// then mv it back to its recorded origin. Target is the quarantine-dst, the
+// "origin" arg the path to restore to. (Validate already bound the dst under the
+// quarantine dir and the origin to a permitted path.)
+func (e *RealExecutor) unquarantine(req Request) (Result, error) {
+	dst := strings.TrimSpace(req.Target)
+	origin := strings.TrimSpace(req.arg("origin"))
+	// chmod back to readable before the move (the quarantine set it 000) and drop
+	// the immutable bit; both best-effort, then the move is the load-bearing step.
+	_ = run("chattr", "-i", dst)
+	_ = os.Chmod(dst, 0o600)
+	if err := os.Rename(dst, origin); err != nil {
+		if errors.Is(err, syscall.EXDEV) {
+			if cerr := copyThenRemove(dst, origin); cerr != nil {
+				return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("unquarantine copy: %w", cerr)
+			}
+		} else {
+			return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("unquarantine move: %w", err)
+		}
+	}
+	return Result{
+		OK:     true,
+		Action: req.Action,
+		Target: req.Target,
+		Detail: fmt.Sprintf("restored %q → %q (chattr -i)", dst, origin),
+		Undo:   "", // its own inverse is to re-quarantine
+	}, nil
+}
+
+// deIsolate is the §4.6 reverse of isolate: delete the nftables isolation table,
+// lifting the host-wide egress drop. Best-effort like isolate; a failed delete is
+// surfaced as an error so a half-isolated host is loud, not silent.
+func (e *RealExecutor) deIsolate(req Request) (Result, error) {
+	table := e.IsolateTable
+	if table == "" {
+		table = "dsuite_isolate"
+	}
+	if err := run("nft", "delete", "table", "inet", table); err != nil {
+		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("de-isolate: %w", err)
+	}
+	return Result{
+		OK:     true,
+		Action: req.Action,
+		Target: req.Target,
+		Detail: fmt.Sprintf("deleted nftables table inet %s (egress restored)", table),
+		Undo:   "", // its own inverse is to re-isolate
+	}, nil
+}
+
+// restoreKey is the §4.6 reverse of revoke-key: restore authorized_keys from its
+// .dsuite.bak backup. Target is the authorized_keys path; the backup is the same
+// .dsuite.bak revoke-key wrote.
+func (e *RealExecutor) restoreKey(req Request) (Result, error) {
+	path := strings.TrimSpace(req.Target)
+	backup := path + ".dsuite.bak"
+	data, err := os.ReadFile(backup)
+	if err != nil {
+		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("restore-key: read backup %q: %w", backup, err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("restore-key: write %q: %w", path, err)
+	}
+	return Result{
+		OK:     true,
+		Action: req.Action,
+		Target: req.Target,
+		Detail: fmt.Sprintf("restored %q from %q", path, backup),
+		Undo:   "", // its own inverse is to re-revoke
 	}, nil
 }
 

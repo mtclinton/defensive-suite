@@ -158,10 +158,12 @@ func cmdPreflight(args []string) int {
 		cfg.CollectorURL = *collector
 	}
 
-	// Auto-response: canary/armed are NOT implemented in this build. Preflight
-	// fails fast on them so arming an executing mode is caught before run.
-	if _, modeErr := respond.ParseMode(cfg.AutoResponseMode); modeErr != nil {
-		fmt.Fprintf(os.Stderr, "<2>agentd: %v (configured mode %q)\n", modeErr, cfg.AutoResponseMode)
+	// Auto-response: canary/armed FAIL FAST in this build, gated on concrete,
+	// currently-unsatisfiable arming preconditions (§E/§7). Preflight enumerates
+	// EXACTLY what is missing so an operator who configured an executing mode sees
+	// the precise blockers (not a flat "not implemented").
+	if err := checkArmingGate(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "<2>agentd: %v\n", err)
 		return 2
 	}
 
@@ -218,16 +220,17 @@ func cmdRun(args []string) int {
 		cfg.ResponseEnabled = true
 	}
 
-	// Phase 4 auto-response DECISION layer (Increment 1: decide + shadow + measure,
-	// NEVER execute). canary/armed are not implemented in this build: fail fast so
-	// an operator who configured an executing mode gets a clear error rather than a
-	// silent clamp. off|dry-run|shadow proceed; the bridge clamps any residual
-	// canary/armed to shadow (belt-and-suspenders).
-	autoMode, modeErr := respond.ParseMode(cfg.AutoResponseMode)
-	if modeErr != nil {
-		fmt.Fprintf(os.Stderr, "<2>agentd: %v (configured mode %q)\n", modeErr, cfg.AutoResponseMode)
+	// Phase 4 auto-response DECISION layer (decide + shadow + measure, NEVER
+	// execute). canary/armed FAIL FAST in this build, gated on concrete,
+	// currently-unsatisfiable arming preconditions (§E/§7): the refusal enumerates
+	// EXACTLY what is missing. off|dry-run|shadow proceed; the bridge is built with
+	// the SAFE-CLAMPED mode (ParseMode never returns canary/armed) so a Bridge is
+	// never constructed in an executing mode and remains structurally inert.
+	if err := checkArmingGate(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "<2>agentd: %v\n", err)
 		return 2
 	}
+	autoMode, _ := respond.ParseMode(cfg.AutoResponseMode) // clamped: never canary/armed
 	bridge := respond.NewBridge(autoConfig(cfg, autoMode), time.Now, nil, nil)
 
 	buf := pipeline.NewBuffer(cfg.BufferMax)
@@ -333,14 +336,49 @@ func cmdRun(args []string) int {
 		}
 	}()
 
+	// §4.0 RESPONDER LIFECYCLE REFACTOR. Build the single Responder + audit log ONCE
+	// at cmdRun scope (hoisted OUT of startResponse) so one responder + one audit
+	// log exist for the life of the run — reachable by the manual socket server now,
+	// and by the FUTURE bridge→Respond wire later (a deliberate post-soak step, NOT
+	// wired here). The audit file is closed at the TOP-LEVEL on ctx.Done() (below),
+	// after BOTH consumers (the serve goroutine and — later — the tail loop) have
+	// stopped, NOT inside the serve goroutine. Construction is attempted only when a
+	// response surface is configured; it FAILS CLOSED when response is ENABLED and
+	// the audit log can't be opened (a destructive action must never run unaudited).
+	var responder *respond.Responder
+	var auditCloser io.Closer
 	if cfg.ResponseSocket != "" {
-		if err := startResponse(ctx, cfg); err != nil {
-			// A response-config problem must NEVER kill detection. Log loudly and
-			// carry on tailing — previously this returned, so a misconfigured (or
-			// defaulted) response socket silently aborted the whole detector.
-			fmt.Fprintf(os.Stderr, "<3>agentd: response socket NOT served: %v (detection continues)\n", err)
+		r, closer, err := buildResponder(cfg)
+		if err != nil {
+			if cfg.ResponseEnabled {
+				// FAIL CLOSED: response is armed but we cannot audit it. Do NOT serve a
+				// live, unaudited response surface. Detection still continues.
+				fmt.Fprintf(os.Stderr, "<2>agentd: response ENABLED but NOT served (fail-closed): %v (detection continues)\n", err)
+			} else {
+				// A response-config problem must NEVER kill detection. Log loudly and
+				// carry on tailing — previously this returned, so a misconfigured (or
+				// defaulted) response socket silently aborted the whole detector.
+				fmt.Fprintf(os.Stderr, "<3>agentd: response socket NOT served: %v (detection continues)\n", err)
+			}
+		} else {
+			responder, auditCloser = r, closer
+			if serr := serveResponse(ctx, cfg, responder); serr != nil {
+				fmt.Fprintf(os.Stderr, "<3>agentd: response socket NOT served: %v (detection continues)\n", serr)
+			}
+			// Decouple auditFile.Close() from the serve goroutine: close it at the
+			// top level once ctx is done (after both consumers have stopped). This
+			// closes the §4.0 self-DoS where a post-close Respond writes unaudited.
+			defer func() {
+				if auditCloser != nil {
+					_ = auditCloser.Close()
+				}
+			}()
 		}
 	}
+	// responder is intentionally NOT passed to the tail callback / bridge: the
+	// bridge→Respond connection is a deliberate post-soak step (DEFERRED). The
+	// bridge still holds no executor and cannot take any action this increment.
+	_ = responder
 
 	// Checkpoint the tail position under the state dir so a crash/restart resumes
 	// where it left off (catch up on events written during downtime) instead of
@@ -366,6 +404,34 @@ func cmdRun(args []string) int {
 	})
 	flush()
 	return 0
+}
+
+// checkArmingGate enforces the §E/§7 arming preconditions for canary/armed. It
+// returns nil for off/dry-run/shadow (those never execute), and a FATAL error
+// enumerating every unmet precondition for canary/armed. Because the deferred
+// safety mechanisms (the bridge→Respond wire, grace/veto queue, console push,
+// reachability watchdog, authenticated export impl) are NOT built in this
+// increment, canary/armed are ALWAYS refused — auto-response cannot fire. The
+// soak-attestation + authenticated-export config gates are satisfiable, so the
+// message can pinpoint precisely what remains.
+func checkArmingGate(cfg config.Config) error {
+	requested := respond.ParseRequestedMode(cfg.AutoResponseMode)
+	in := respond.ArmingInputs{
+		SoakAttested:        cfg.AutoResponseSoakAttested != "" && fileExists(cfg.AutoResponseSoakAttested),
+		AuthenticatedExport: respond.AuthenticatedTetragonSource(cfg.TetragonSource),
+	}
+	if missing := respond.ArmingPreconditions(requested, in); len(missing) > 0 {
+		return respond.ArmingRefusalError(requested, missing)
+	}
+	return nil
+}
+
+// fileExists reports whether path names an existing file (the soak-attestation
+// artifact gate). A non-IsNotExist error is treated as absent (fail-safe: an
+// unreadable attestation does not satisfy the gate).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // autoConfig builds the auto-response DECISION config from the agent config. It
@@ -406,23 +472,30 @@ func orNone(s string) string {
 	return s
 }
 
-// startResponse stands up the manual-response unix socket and serves it for the
-// lifetime of ctx. The Responder is built DRY-RUN unless cfg.ResponseEnabled is
-// true, so by default it never touches the system. A missing response token is
-// fatal: a privileged socket with no auth must not start.
-func startResponse(ctx context.Context, cfg config.Config) error {
+// buildResponder constructs the single Responder + its append-only audit log at
+// cmdRun scope (§4.0 lifecycle refactor). It is hoisted OUT of the old
+// startResponse so one responder + one audit log exist for the whole run,
+// reachable by the manual socket server now and the future bridge wire later. It
+// returns the responder and an io.Closer for the audit file (closed at top level
+// on ctx.Done, NOT in the serve goroutine). A missing response token is fatal: a
+// privileged socket with no auth must not start. The audit log is opened EAGERLY
+// so the caller can FAIL CLOSED (refuse to serve a live, unaudited surface) when
+// response is enabled and the audit log can't be opened. The Responder is built
+// DRY-RUN unless cfg.ResponseEnabled — by default it never touches the system —
+// and behaves EXACTLY as the previous startResponse responder did.
+func buildResponder(cfg config.Config) (*respond.Responder, io.Closer, error) {
 	if cfg.ResponseToken == "" {
-		return fmt.Errorf("refusing to serve %s without AGENT_RESPONSE_TOKEN set", cfg.ResponseSocket)
+		return nil, nil, fmt.Errorf("refusing to serve %s without AGENT_RESPONSE_TOKEN set", cfg.ResponseSocket)
 	}
 
 	// Append-only audit log next to the socket-owner's state dir.
 	auditPath := filepath.Join(filepath.Dir(cfg.QuarantineDir), "response-audit.jsonl")
 	if err := os.MkdirAll(filepath.Dir(auditPath), 0o700); err != nil {
-		return fmt.Errorf("audit dir: %w", err)
+		return nil, nil, fmt.Errorf("audit dir: %w", err)
 	}
 	auditFile, err := os.OpenFile(auditPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fmt.Errorf("audit log: %w", err)
+		return nil, nil, fmt.Errorf("audit log: %w", err)
 	}
 
 	guards := respond.DefaultGuards()
@@ -449,6 +522,15 @@ func startResponse(ctx context.Context, cfg config.Config) error {
 	//   - rate limit: cap live executions per window against a hijacked mass-action.
 	r.WithKillSwitch(cfg.ResponseKillSwitch, nil)
 	r.WithRateLimit(cfg.ResponseRateMax, cfg.ResponseRateWindow)
+	return r, auditFile, nil
+}
+
+// serveResponse stands up the manual-response unix socket and serves the
+// already-built responder for the lifetime of ctx (§4.0: startResponse is now
+// just "serve the already-built responder"). It does NOT own the audit file's
+// lifecycle — that is closed at the top level on ctx.Done, decoupled from this
+// goroutine. The manual socket path behaves EXACTLY as before.
+func serveResponse(ctx context.Context, cfg config.Config, r *respond.Responder) error {
 	h := respond.NewHandler(r, cfg.ResponseToken, cfg.ResponseMaxBody)
 
 	ln, err := respond.Listen(cfg.ResponseSocket)
@@ -457,7 +539,7 @@ func startResponse(ctx context.Context, cfg config.Config) error {
 	}
 
 	mode := "DRY-RUN (no destructive action)"
-	if !dryRun {
+	if !r.DryRun {
 		mode = "ENABLED — actions are LIVE"
 	}
 	fmt.Fprintf(os.Stderr, "agentd: response socket %s serving (%s)\n", cfg.ResponseSocket, mode)
@@ -472,7 +554,9 @@ func startResponse(ctx context.Context, cfg config.Config) error {
 		if err := respond.Serve(ctx, ln, h, cfg.ResponseSocket); err != nil {
 			fmt.Fprintln(os.Stderr, "agentd: response serve:", err)
 		}
-		_ = auditFile.Close()
+		// NOTE: the audit file is intentionally NOT closed here — it is owned by
+		// cmdRun and closed at the top level on ctx.Done (§4.0 decoupling), after
+		// every responder consumer has stopped.
 	}()
 	return nil
 }

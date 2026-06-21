@@ -70,6 +70,11 @@ var ErrModeNotImplemented = fmt.Errorf("auto-response execution is not implement
 // canary/armed (including "armed:<csv>") return (ModeShadow, ErrModeNotImplemented)
 // so the caller can BOTH hard-error at startup AND, if it proceeds anyway, run
 // clamped to shadow. Any unrecognized value is off (fail-safe), no error.
+//
+// ParseMode is the SAFE-CLAMP parser used to build the (always-inert) Bridge: it
+// can never return canary/armed, so a Bridge is never constructed in an executing
+// mode. The ARMING GATE (ParseRequestedMode + ArmingPreconditions) is what
+// produces the precise canary/armed refusal; cmdRun/cmdPreflight call it FIRST.
 func ParseMode(s string) (Mode, error) {
 	s = strings.ToLower(strings.TrimSpace(s))
 	// "armed:<csv>" is the broaden-ladder form; treat the prefix as armed.
@@ -87,6 +92,32 @@ func ParseMode(s string) (Mode, error) {
 		return ModeShadow, ErrModeNotImplemented
 	default:
 		return ModeOff, nil // unparseable → off (fail-safe)
+	}
+}
+
+// ParseRequestedMode maps a config string to the mode the operator ACTUALLY
+// requested, WITHOUT the safe-clamp: "canary" → ModeCanary, "armed"/"armed:<csv>"
+// → ModeArmed. off/dry-run/shadow parse as normal; an unrecognized value is off
+// (fail-safe). Unlike ParseMode it returns no error and does not clamp — it is the
+// input to the §E arming gate (ArmingPreconditions), which is what refuses
+// canary/armed with the precise missing-precondition list. The result is NEVER
+// used to construct a Bridge (that always uses the clamped ParseMode).
+func ParseRequestedMode(s string) Mode {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if strings.HasPrefix(s, "armed") {
+		return ModeArmed
+	}
+	switch s {
+	case "", "off":
+		return ModeOff
+	case "dry-run", "dryrun":
+		return ModeDryRun
+	case "shadow":
+		return ModeShadow
+	case "canary":
+		return ModeCanary
+	default:
+		return ModeOff // unparseable → off (fail-safe)
 	}
 }
 

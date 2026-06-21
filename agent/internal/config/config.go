@@ -118,6 +118,23 @@ type Config struct {
 	// MgmtSubnets are CIDRs (in addition to RFC1918/CGNAT/link-local/loopback)
 	// the G7 destination-class gate treats as NON-external (ineligible for auto).
 	MgmtSubnets []string
+
+	// --- Phase 4 §7 / §E ARMING PRECONDITION gates (canary/armed) ---
+	// These are checked ONLY for canary/armed. They are absent/file by default, so
+	// canary/armed remain a FATAL preflight error in this build (auto-response
+	// still cannot fire). off/dry-run/shadow ignore them entirely.
+
+	// AutoResponseSoakAttested points at a soak-attestation artifact the operator
+	// produces AFTER a passing FP soak (§7.2). Empty (the default) → canary/armed
+	// are refused for lack of attestation. The file's mere EXISTENCE is the gate
+	// (its contents are the operator's runbook record).
+	AutoResponseSoakAttested string
+	// TetragonSource selects the Tetragon event source for arming-trust purposes
+	// (§5 row 3 / Open Q #1): "file" (the default tail) can only reach SHADOW; a
+	// "grpc"/"socket" authenticated export is REQUIRED for canary+. Default "file"
+	// → canary/armed ineligible. The authenticated export itself is NOT implemented
+	// in this build (only its preflight gate is) — see the deferred list.
+	TetragonSource string
 }
 
 // Defaults returns a safe baseline for a single Linux workstation.
@@ -206,6 +223,12 @@ func Defaults() Config {
 		// rejects all RFC1918/CGNAT/link-local independently, so these are belt-and-
 		// suspenders for any additionally-routed mgmt space.
 		MgmtSubnets: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"},
+
+		// Phase 4 arming-precondition gates. SAFE defaults: no soak attestation, and
+		// the file-tail source (which §5 row 3 caps at shadow). With these defaults
+		// canary/armed are REFUSED — auto-response cannot fire in this build.
+		AutoResponseSoakAttested: "",
+		TetragonSource:           "file",
 	}
 }
 
@@ -289,6 +312,13 @@ func Load(getenv func(string) string) Config {
 	}
 	if v := getenv("AGENT_MGMT_SUBNETS"); v != "" {
 		c.MgmtSubnets = splitList(v)
+	}
+	// --- Phase 4 arming-precondition gates (canary/armed only) ---
+	if v := getenv("AGENT_AUTORESPONSE_SOAK_ATTESTED"); v != "" {
+		c.AutoResponseSoakAttested = v
+	}
+	if v := getenv("AGENT_TETRAGON_SOURCE"); v != "" {
+		c.TetragonSource = strings.ToLower(strings.TrimSpace(v))
 	}
 	return c
 }
