@@ -597,6 +597,10 @@ veto window. Isolate has whole-host blast + the M3 class, so it is promoted only
 
 ### 7.2 The false-positive soak prerequisite (the hard gate)
 
+> **Runbook:** the step-by-step procedure (enable shadow, run ≥14 days with real churn, the
+> exact `jq` queries against the collector, the triage + arm checklist) is in
+> [`PHASE4_FP_SOAK.md`](PHASE4_FP_SOAK.md).
+
 **Rule: you may not promote past Shadow until you have measured the real-world auto-action
 *candidate* rate on the actual workload. No measurement → no arming. Full stop.** The rate
 limit and kill-switch are damage *caps*, not substitutes for knowing the FP rate. The soak
