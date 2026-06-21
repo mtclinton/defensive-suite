@@ -623,6 +623,20 @@ func copyThenRemoveNoFollow(src, dst string) error {
 // moved (checked==acted, §4.2 #17). A mismatch means the target was swapped
 // between the check (fstat) and the act (rename); an error means we cannot prove
 // identity. Either way it returns non-nil and the caller rolls back + refuses.
+// confirmMovedInode re-opens the moved file O_NOFOLLOW and refuses unless its
+// (Ino,Dev) still equals the pre-move fstat — catching a swap where the attacker
+// substituted a DIFFERENT-inode file between check and act (the common case).
+//
+// RESIDUAL (honest): the (Ino,Dev) NUMBER compare does NOT defend against inode
+// REUSE — a local attacker who, in the race window, frees the checked inode and
+// gets the SAME inode number reallocated to a substituted file passes this check.
+// The fully TOCTOU-safe move is linkat(AT_EMPTY_PATH) from the held O_NOFOLLOW/
+// O_PATH fd into the quarantine dir (links the EXACT validated inode, immune to
+// path swaps AND number reuse; needs CAP_DAC_READ_SEARCH) — a Linux-only hardening
+// deferred to the live-canary gate (see PHASE4_DESIGN.md). This best-effort
+// number-compare is strictly better than the prior act-by-path-after-close (which
+// confirmed nothing); it is acceptable here only because quarantineFD is STAGED,
+// never auto-fired in this build.
 func confirmMovedInode(dst string, want syscall.Stat_t) error {
 	f, err := os.OpenFile(dst, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {

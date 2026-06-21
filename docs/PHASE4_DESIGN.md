@@ -199,7 +199,13 @@ So the bridge **never acts on the `Path` string as a target.** It binds the acti
   whose realpath is resident **under a configured `StagingDir`**. Refuse otherwise.
 - Resolve and act **by fd** (`O_NOFOLLOW` open + `fstat`, act on the fd) so the file checked
   is the file acted on — closing the TOCTOU split between an AutoGuards realpath check and a
-  lexical `os.Rename` (#17).
+  lexical `os.Rename` (#17). **Implementation status (increment 2):** the staged `quarantineFD`
+  opens `O_NOFOLLOW` + `fstat`, renames, then re-`fstat`s the moved inode and compares `(Ino,Dev)`
+  (`confirmMovedInode`, rolls back on mismatch). This catches a *different-inode* swap but **not
+  inode REUSE** (a number-compare residual). **Deferred-before-live hardening:** `linkat(AT_EMPTY_PATH)`
+  from the held fd into the quarantine dir (links the EXACT validated inode; immune to reuse;
+  Linux-only, needs `CAP_DAC_READ_SEARCH`). Acceptable as best-effort only because the actuator is
+  STAGED (never auto-fired) until canary.
 - **Refuse any quarantine of a path outside `StagingDirs` on the auto path.** A forged
   finding naming `/opt/...` no longer matches a staging-resident live process, so the
   "quarantine an arbitrary legit file" surface collapses.

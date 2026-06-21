@@ -329,13 +329,24 @@ func TestQuarantineFDDetectsInodeSwapAndRollsBack(t *testing.T) {
 	run = func(name string, args ...string) error { return nil }
 	defer func() { run = origRun }()
 
-	// Swap hook: just before the real rename, replace the source path's inode with
-	// a DIFFERENT file (e.g. an attacker-swapped-in legit binary). The move then
-	// relocates the WRONG inode; the post-move confirm must catch it.
+	// Swap hook: just before the real rename, replace the source path with a
+	// DIFFERENT-inode file (an attacker-swapped-in binary). The move then relocates
+	// the WRONG inode; the post-move confirm must catch it.
+	//
+	// Create the swapped-in file at a SEPARATE path FIRST — while the original src
+	// inode still exists — so it is GUARANTEED a different inode, then swap it into
+	// place. (Do NOT remove+recreate at `src`: on Linux the just-freed inode is
+	// immediately REUSED, so the recreated file gets the SAME inode number and the
+	// swap is undetectable by a number-compare — that reuse case is the documented
+	// residual of confirmMovedInode; see executor.go.)
 	origRename := renameFn
 	renameFn = func(src, dst string) error {
+		swapped := src + ".attacker"
+		if err := os.WriteFile(swapped, []byte("SWAPPED-LEGIT-BINARY"), 0o755); err != nil {
+			return err
+		}
 		_ = os.Remove(src)
-		if err := os.WriteFile(src, []byte("SWAPPED-LEGIT-BINARY"), 0o755); err != nil {
+		if err := os.Rename(swapped, src); err != nil {
 			return err
 		}
 		return origRename(src, dst)
