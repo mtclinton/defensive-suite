@@ -676,10 +676,11 @@ $("#nav").addEventListener("click",e=>{
 /* ---------- keyboard nav (j/k/↵/esc) ---------- */
 let sel=-1;
 function activeRows(){
-  // operate on whichever feed is visible (Overview or Findings)
-  const id = $("#v-findings").hidden ? "#rows" : "#rowsAll";
-  const useId = $("#v-overview").hidden ? "#rowsAll" : "#rows";
-  return [...document.querySelectorAll(useId+" .row")];
+  // operate on whichever feed is actually visible — Overview's #rows or Findings'
+  // #rowsAll. On Tools/Threats neither feed is shown, so keyboard nav is a no-op.
+  if(!$("#v-overview").hidden) return [...document.querySelectorAll("#rows .row")];
+  if(!$("#v-findings").hidden) return [...document.querySelectorAll("#rowsAll .row")];
+  return [];
 }
 function mark(R){R.forEach((r,i)=>r.classList.toggle('sel',i===sel));}
 document.addEventListener('keydown',e=>{
@@ -691,7 +692,7 @@ document.addEventListener('keydown',e=>{
   const R=activeRows(); if(!R.length) return;
   if(e.key==='j'){ sel=Math.min(sel+1,R.length-1); mark(R); R[sel].scrollIntoView({block:'nearest'}); }
   if(e.key==='k'){ sel=Math.max(sel-1,0); mark(R); R[sel].scrollIntoView({block:'nearest'}); }
-  if(e.key==='Enter'&&sel>=0) openD(VIEW[+R[sel].dataset.i]);
+  if(e.key==='Enter'&&sel>=0&&sel<R.length) openD(VIEW[+R[sel].dataset.i]);
 });
 
 /* ---------- live report loading (file ingest) ---------- */
