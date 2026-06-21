@@ -580,8 +580,8 @@ function groupFindings(arr){
   for(const f of arr){
     // never collapse the correlated hero finding — unique key per object
     const key = (f.check==="realtime.correlated")
-      ? " correlated "+order.length
-      : [f.tool||"", f.check||"", f.title||""].join(" ");
+      ? "\0correlated\0"+order.length
+      : [f.tool||"", f.check||"", f.title||""].join("\0");
     let g = groups.get(key);
     if(!g){
       g = {...f, _count:1, _instances:[f]};
