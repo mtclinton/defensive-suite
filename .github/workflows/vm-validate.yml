@@ -61,7 +61,7 @@ jobs:
       - name: run the validation harness
         run: |
           set -x
-          ARGS="-y --force-baremetal --keep"   # runner is ephemeral; --keep preserves logs for the dump step
+          ARGS="-y --force-baremetal --keep --with-armed"   # runner is ephemeral; --keep preserves logs for the dump step; --with-armed proves the SHIPPED hardened unit (gate #2)
           [ "${{ inputs.with_response }}" = "true" ] && ARGS="$ARGS --with-response"
           sudo env "PATH=$PATH" AGENT_TETRAGON_LOG=/var/log/tetragon/tetragon.log \
             ./validation/validate.sh $ARGS
@@ -79,3 +79,7 @@ jobs:
           sudo bash -c 'wc -c /var/log/tetragon/tetragon.log; wc -l /var/log/tetragon/tetragon.log' 2>/dev/null || true
           echo "===== loaded tracing policies ====="; sudo tetra tracingpolicy list || true
           echo "===== tetragon journal (tail) ====="; sudo journalctl -u tetragon --no-pager | tail -30 || true
+          echo "===== agentd-response unit status (stage 4b — the SHIPPED hardened unit) ====="
+          sudo systemctl --no-pager status agentd-response 2>/dev/null | tail -20 || echo "(agentd-response not present)"
+          echo "===== agentd-response journal (tail) — a wrong ReadWritePaths/caps/Protect* shows here ====="
+          sudo journalctl -u agentd-response --no-pager 2>/dev/null | tail -40 || echo "(no agentd-response journal)"

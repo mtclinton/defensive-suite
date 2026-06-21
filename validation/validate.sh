@@ -33,6 +33,8 @@
 #   sudo ./validate.sh -y                 # detect + enforce (+ implant-absent check)
 #   sudo ./validate.sh -y --with-response # also the live kill (M3)
 #   sudo ./validate.sh -y --with-override # also stage 3b: the Override TRUE block
+#   sudo ./validate.sh -y --with-armed    # also stage 4b: the SHIPPED hardened unit
+#                                         #   (kill/quarantine + kill-switch + rate-limit)
 #   Flags: --keep (leave everything up) --force-baremetal (skip the VM guard)
 set -uo pipefail
 
@@ -40,21 +42,33 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SELF/.." && pwd)"
 PORT="${DSUITE_VALIDATE_PORT:-8799}"
 TLOG="${AGENT_TETRAGON_LOG:-/var/log/tetragon/tetragon.log}"
-YES=0 WITH_RESPONSE=0 WITH_OVERRIDE=0 FORCE_BAREMETAL=0 KEEP=0
+YES=0 WITH_RESPONSE=0 WITH_OVERRIDE=0 WITH_ARMED=0 FORCE_BAREMETAL=0 KEEP=0
 
 for a in "$@"; do case "$a" in
   -y|--yes)            YES=1 ;;
   --with-response)     WITH_RESPONSE=1 ;;
   --with-override)     WITH_OVERRIDE=1 ;;
+  --with-armed)        WITH_ARMED=1 ;;
   --force-baremetal)   FORCE_BAREMETAL=1 ;;
   --keep)              KEEP=1 ;;
-  -h|--help)           sed -n '2,30p' "$0"; exit 0 ;;
+  -h|--help)           sed -n '2,38p' "$0"; exit 0 ;;
   *) echo "unknown arg: $a (see --help)"; exit 2 ;;
 esac; done
 
 c_g=$'\e[32m'; c_r=$'\e[31m'; c_y=$'\e[33m'; c_0=$'\e[0m'
 PASS=0; FAIL=0
 BG_PIDS=(); VICTIM_PID=""; WORK=""
+# stage 4b (hardened armed unit) host-mutation markers. All default to "this run
+# did NOT touch it", so a non-4b run (or a 4b run that aborted before a given step)
+# never tears down host systemd/binaries. ARMED_RAN gates the whole 4b cleanup
+# block; the *_BAK paths hold backups of any PRE-EXISTING host files to restore.
+ARMED_RAN=0
+ARMED_UNIT=/etc/systemd/system/agentd-response.service
+ARMED_UNIT_BAK=""; ARMED_UNIT_MADE=0
+ARMED_ENV=/etc/agentd/agentd.env
+ARMED_ENV_BAK=""; ARMED_ENV_MADE=0
+ARMED_BIN=/usr/local/bin/agentd
+ARMED_BIN_BAK=""; ARMED_BIN_MADE=0
 say(){ printf '\n%s=== %s ===%s\n' "$c_y" "$*" "$c_0"; }
 info(){ printf '    %s\n' "$*"; }
 pass(){ PASS=$((PASS+1)); printf '  %s[PASS]%s %s\n' "$c_g" "$c_0" "$*"; }
@@ -78,6 +92,32 @@ cleanup(){
   tetra tracingpolicy delete dsuite-enforce 2>/dev/null && info "removed enforce policy"
   tetra tracingpolicy delete dsuite-observe 2>/dev/null && info "removed observe policy"
   nft delete table inet dsuite_isolate 2>/dev/null
+  # stage 4b teardown — ONLY if 4b actually ran (marker), so a non-4b run NEVER
+  # touches host systemd or /usr/local/bin/agentd. Stop+disable the shipped unit,
+  # remove the kill-switch, then restore each host file we backed up OR remove the
+  # one we created. Done before `rm -rf "$WORK"` so the backups (kept in $WORK) are
+  # still readable.
+  if [ "$ARMED_RAN" = 1 ]; then
+    systemctl stop agentd-response 2>/dev/null
+    systemctl disable agentd-response 2>/dev/null
+    rm -f /run/agentd/response.disabled 2>/dev/null
+    if [ -n "$ARMED_UNIT_BAK" ] && [ -f "$ARMED_UNIT_BAK" ]; then
+      install -m0644 "$ARMED_UNIT_BAK" "$ARMED_UNIT" && info "restored pre-existing $ARMED_UNIT"
+    elif [ "$ARMED_UNIT_MADE" = 1 ]; then
+      rm -f "$ARMED_UNIT" && info "removed harness-installed $ARMED_UNIT"
+    fi
+    if [ -n "$ARMED_ENV_BAK" ] && [ -f "$ARMED_ENV_BAK" ]; then
+      install -m0600 "$ARMED_ENV_BAK" "$ARMED_ENV" && info "restored pre-existing $ARMED_ENV"
+    elif [ "$ARMED_ENV_MADE" = 1 ]; then
+      rm -f "$ARMED_ENV" && info "removed harness-generated $ARMED_ENV"
+    fi
+    if [ -n "$ARMED_BIN_BAK" ] && [ -f "$ARMED_BIN_BAK" ]; then
+      install -m0755 "$ARMED_BIN_BAK" "$ARMED_BIN" && info "restored pre-existing $ARMED_BIN"
+    elif [ "$ARMED_BIN_MADE" = 1 ]; then
+      rm -f "$ARMED_BIN" && info "removed harness-installed $ARMED_BIN"
+    fi
+    systemctl daemon-reload 2>/dev/null
+  fi
   rm -rf "$WORK" 2>/dev/null
   info "done — VM left as it was (Tetragon still installed/running)."
 }
@@ -117,7 +157,7 @@ This harness ARMS Tetragon enforcement (SIGKILL on non-allow-listed eBPF program
 loads) on THIS machine, and with --with-response will KILL a throwaway process via
 agentd. Run it only on a disposable Linux VM you can afford to break.
 
-Re-run with -y to proceed.  Optional: --with-response  --keep  --force-baremetal
+Re-run with -y to proceed.  Optional: --with-response  --with-armed  --keep  --force-baremetal
 EOF
   exit 0
 fi
@@ -411,6 +451,182 @@ if [ "$WITH_RESPONSE" = 1 ]; then
   else
     fail "no kill entry in $DATA/response-audit.jsonl (audit trail missing)"
   fi
+fi
+
+# ──────────────────── stage 4b — hardened armed path + brakes (optional, LIVE) ────────────────────
+# Pre-Phase-4 gate #2: prove the ARMED response path works through the REAL SHIPPED
+# systemd unit (agent/deploy/systemd/agentd-response.service) — not an ad-hoc
+# `agentd run` like stage 4, but the hardened sandbox (ProtectSystem=full, bounded
+# AmbientCapabilities, RuntimeDirectory, the EnvironmentFile/ReadWritePaths the unit
+# REQUIRES). The unit-start assertion alone catches a wrong ReadWritePaths/caps/
+# Protect* directive (namespace setup fails → unit won't start). Then it drives the
+# live actuators (kill, quarantine) and BOTH brakes (kill-switch, rate-limit)
+# through the unit. Root + systemd + throwaway VM only (guarded in stage 0).
+if [ "$WITH_ARMED" = 1 ]; then
+  say "stage 4b — hardened armed path: the SHIPPED agentd-response.service + the response brakes (LIVE)"
+
+  # Stop the stage-2 observe agentd so we don't double-tail the export (the unit
+  # starts its own agentd tailing the same $TLOG).
+  kill "$AGENTD_PID" 2>/dev/null; wait "$AGENTD_PID" 2>/dev/null
+
+  # --- install the binary the unit's ExecStart points at, SAFELY -------------
+  # Back up a pre-existing /usr/local/bin/agentd (a real install) and restore on
+  # cleanup; if absent, mark that 4b created it (removed on cleanup).
+  ARMED_RAN=1   # from here on, cleanup is allowed to touch host systemd/binaries
+  if [ -e "$ARMED_BIN" ]; then
+    ARMED_BIN_BAK="$WORK/agentd.host.bak"; cp -a "$ARMED_BIN" "$ARMED_BIN_BAK"
+    info "backed up pre-existing $ARMED_BIN → $ARMED_BIN_BAK"
+  else
+    ARMED_BIN_MADE=1
+  fi
+  install -m0755 "$BIN/agentd" "$ARMED_BIN" || die "could not install agentd to $ARMED_BIN"
+
+  # --- the ReadWritePaths the unit REQUIRES must EXIST before start ----------
+  # (/etc/fapolicyd /var/lib/agentd /run/agentd; /run/agentd is RuntimeDirectory,
+  # systemd makes it — but the others must pre-exist or the namespace setup fails,
+  # which is exactly the class of bug this gate catches.)
+  mkdir -p /etc/agentd /etc/fapolicyd /var/lib/agentd/quarantine
+
+  # --- the EnvironmentFile the unit REQUIRES (no `-` prefix → must exist) ----
+  # Back up any existing one, restore on cleanup. Do NOT set a low rate yet —
+  # sub-tests 1-3 need headroom (the agent default is 10/60s); the rate-limit
+  # sub-test (4) rewrites this file to add AGENT_RESPONSE_RATE.
+  ARMTOKEN="armed-$(rand)"
+  if [ -e "$ARMED_ENV" ]; then
+    ARMED_ENV_BAK="$WORK/agentd.env.host.bak"; cp -a "$ARMED_ENV" "$ARMED_ENV_BAK"
+    info "backed up pre-existing $ARMED_ENV → $ARMED_ENV_BAK"
+  else
+    ARMED_ENV_MADE=1
+  fi
+  cat > "$ARMED_ENV" <<EOF
+AGENT_RESPONSE_TOKEN=$ARMTOKEN
+AGENT_TETRAGON_LOG=$TLOG
+AGENT_QUARANTINE_DIR=/var/lib/agentd/quarantine
+EOF
+  chmod 0600 "$ARMED_ENV"
+
+  # --- install the SHIPPED unit verbatim, SAFELY ----------------------------
+  if [ -e "$ARMED_UNIT" ]; then
+    ARMED_UNIT_BAK="$WORK/agentd-response.service.host.bak"; cp -a "$ARMED_UNIT" "$ARMED_UNIT_BAK"
+    info "backed up pre-existing $ARMED_UNIT → $ARMED_UNIT_BAK"
+  else
+    ARMED_UNIT_MADE=1
+  fi
+  install -m0644 "$REPO_ROOT/agent/deploy/systemd/agentd-response.service" "$ARMED_UNIT" \
+    || die "could not install the shipped agentd-response.service"
+  systemctl daemon-reload
+
+  # --- THE CORE GATE #2 RESULT: the hardened unit actually STARTS ------------
+  systemctl start agentd-response 2>/dev/null
+  sleep 2
+  if systemctl is-active --quiet agentd-response && [ -S /run/agentd/agentd.sock ]; then
+    pass "agentd-response.service started under the hardened sandbox (ProtectSystem=full + bounded caps); socket present"
+  else
+    fail "agentd-response.service did NOT start (or no socket) — a wrong ReadWritePaths/caps/Protect* directive breaks namespace setup; journal below:"
+    journalctl -u agentd-response --no-pager 2>/dev/null | tail -8
+  fi
+
+  # --- a SECOND collector that proxies POST /api/respond → the unit's socket -
+  # Distinct port + fresh data dir so it doesn't collide with the stage-2 collector.
+  APORT=$(( PORT + 1 )); ADATA="$WORK/armed-collector-data"; mkdir -p "$ADATA"
+  COLLECTOR_AGENT_SOCKET=/run/agentd/agentd.sock COLLECTOR_RESPONSE_TOKEN="$ARMTOKEN" \
+    "$BIN/collector" --addr "127.0.0.1:$APORT" --data "$ADATA" >"$WORK/armed-collector.log" 2>&1 &
+  BG_PIDS+=("$!")
+  wait_http "http://127.0.0.1:$APORT/healthz" 30 || fail "armed collector did not come up — see $WORK/armed-collector.log"
+
+  # armed_respond ACTION TARGET — POST a response to the armed collector, which
+  # proxies it to the hardened unit's socket.
+  armed_respond(){
+    curl -fsS -X POST -H "Authorization: Bearer $ARMTOKEN" \
+      -d "{\"action\":\"$1\",\"target\":\"$2\",\"reason\":\"validate-armed\",\"actor\":\"validate.sh\"}" \
+      "http://127.0.0.1:$APORT/api/respond" 2>&1
+  }
+
+  # --- sub-test 1: KILL under the hardened unit -----------------------------
+  sleep 300 & AV1="$!"
+  info "sub-test 1 (kill): spawned victim pid=$AV1; requesting kill via the armed unit..."
+  info "  resp: $(armed_respond kill "$AV1")"
+  sleep 1
+  if victim_dead "$AV1"; then
+    pass "kill works under the hardened armed unit (CAP_KILL OK under ProtectSystem=full)"
+    wait "$AV1" 2>/dev/null
+  else
+    fail "kill did NOT fire under the hardened unit — victim $AV1 still alive"
+    kill -9 "$AV1" 2>/dev/null
+  fi
+
+  # --- sub-test 2: QUARANTINE under the hardened unit ------------------------
+  # On the runner /tmp is often tmpfs → moving into /var/lib/agentd/quarantine is a
+  # cross-mount move (EXDEV) → exercises agentd's copy+remove fallback. Either way
+  # the source must vanish and a copy must land in the quarantine dir.
+  EVIL="/tmp/dsuite-evil-$(rand)"; printf 'malware\n' > "$EVIL"
+  info "sub-test 2 (quarantine): staged $EVIL; requesting quarantine via the armed unit..."
+  info "  resp: $(armed_respond quarantine "$EVIL")"
+  sleep 1
+  if [ ! -e "$EVIL" ] && [ -n "$(ls -A /var/lib/agentd/quarantine 2>/dev/null)" ]; then
+    pass "quarantine works under the hardened unit (CAP_LINUX_IMMUTABLE/FOWNER + ProtectSystem=full + EXDEV OK)"
+  else
+    fail "quarantine did NOT complete (source present? $( [ -e "$EVIL" ] && echo yes || echo no ); quarantine dir contents below):"
+    ls -la /var/lib/agentd/quarantine 2>/dev/null
+    rm -f "$EVIL" 2>/dev/null
+  fi
+
+  # --- sub-test 3: KILL-SWITCH (the panic button) ---------------------------
+  # response.disabled is checked AFTER the guards and refuses regardless of state.
+  touch /run/agentd/response.disabled
+  sleep 300 & AV3="$!"
+  info "sub-test 3 (kill-switch): touched /run/agentd/response.disabled; spawned victim pid=$AV3; requesting kill (must be refused)..."
+  info "  resp: $(armed_respond kill "$AV3")"
+  sleep 1
+  if ! victim_dead "$AV3"; then
+    pass "kill-switch HONORED — action refused while response.disabled present"
+  else
+    fail "kill-switch IGNORED — victim $AV3 was killed despite /run/agentd/response.disabled"
+  fi
+  rm -f /run/agentd/response.disabled
+  info "  removed the kill-switch; re-requesting kill of the same victim (must now fire)..."
+  info "  resp: $(armed_respond kill "$AV3")"
+  sleep 1
+  if victim_dead "$AV3"; then
+    pass "response re-armed after removing the kill-switch"
+    wait "$AV3" 2>/dev/null
+  else
+    fail "response did NOT re-arm after removing the kill-switch — victim $AV3 still alive"
+    kill -9 "$AV3" 2>/dev/null
+  fi
+
+  # --- sub-test 4: RATE-LIMIT (needs a clean window) ------------------------
+  # Add AGENT_RESPONSE_RATE=2/60s and restart the unit so the window starts fresh,
+  # then fire 3 kills rapidly: the first 2 must land, the 3rd must be refused.
+  info "sub-test 4 (rate-limit): setting AGENT_RESPONSE_RATE=2/60s and restarting the armed unit..."
+  cat > "$ARMED_ENV" <<EOF
+AGENT_RESPONSE_TOKEN=$ARMTOKEN
+AGENT_TETRAGON_LOG=$TLOG
+AGENT_QUARANTINE_DIR=/var/lib/agentd/quarantine
+AGENT_RESPONSE_RATE=2/60s
+EOF
+  chmod 0600 "$ARMED_ENV"
+  systemctl restart agentd-response 2>/dev/null
+  sleep 2
+  rl_ok=0; for _ in $(seq 1 10); do [ -S /run/agentd/agentd.sock ] && { rl_ok=1; break; }; sleep 0.3; done
+  if [ "$rl_ok" != 1 ]; then
+    fail "armed unit socket did not reappear after the rate-limit restart — see journalctl -u agentd-response"
+  fi
+  sleep 300 & RV1="$!"; sleep 300 & RV2="$!"; sleep 300 & RV3="$!"
+  info "  spawned 3 victims ($RV1 $RV2 $RV3); firing 3 kills within the 60s window..."
+  info "  resp1: $(armed_respond kill "$RV1")"
+  info "  resp2: $(armed_respond kill "$RV2")"
+  info "  resp3: $(armed_respond kill "$RV3")"
+  sleep 1
+  if victim_dead "$RV1" && victim_dead "$RV2" && ! victim_dead "$RV3"; then
+    pass "rate-limit enforced — 3rd live action refused (2/60s)"
+  else
+    fail "rate-limit NOT as expected — dead: v1=$(victim_dead "$RV1" && echo y || echo n) v2=$(victim_dead "$RV2" && echo y || echo n) v3=$(victim_dead "$RV3" && echo y || echo n) (want v1=y v2=y v3=n)"
+  fi
+  # reap any that died; kill -9 any survivors so we leak nothing
+  for v in "$RV1" "$RV2" "$RV3"; do
+    if victim_dead "$v"; then wait "$v" 2>/dev/null; else kill -9 "$v" 2>/dev/null; fi
+  done
 fi
 
 # ───────────────────────── summary ─────────────────────────
