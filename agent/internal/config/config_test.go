@@ -204,3 +204,71 @@ func TestMgmtIfacesAlwaysKeepsLoopback(t *testing.T) {
 		t.Errorf("loopback must always be kept up: %v", c.MgmtIfaces)
 	}
 }
+
+func TestAutoResponseDefaultsSafe(t *testing.T) {
+	d := Defaults()
+	if d.AutoResponseMode != "off" {
+		t.Errorf("auto-response mode must default to off, got %q", d.AutoResponseMode)
+	}
+	if d.AutoResponseRateMax != 3 || d.AutoResponseRateWindow != 300*time.Second {
+		t.Errorf("auto rate default should be 3/300s, got %d/%v", d.AutoResponseRateMax, d.AutoResponseRateWindow)
+	}
+	if d.AutoResponseDisabled != "/run/agentd/autoresponse.disabled" {
+		t.Errorf("auto disarm latch default wrong: %q", d.AutoResponseDisabled)
+	}
+	// The auto latch must be DISTINCT from the shared manual kill-switch.
+	if d.AutoResponseDisabled == d.ResponseKillSwitch {
+		t.Error("auto-only latch must be a different file from the shared manual kill-switch")
+	}
+	if d.AutoStaleTTL != 5*time.Second {
+		t.Errorf("AutoStaleTTL default should be 5s, got %v", d.AutoStaleTTL)
+	}
+	if len(d.MgmtSubnets) == 0 {
+		t.Error("MgmtSubnets should have private defaults")
+	}
+}
+
+func TestAutoResponseEnvOverlay(t *testing.T) {
+	env := map[string]string{
+		"AGENT_AUTORESPONSE_MODE":      "Shadow",
+		"AGENT_AUTORESPONSE_RATE":      "5/120s",
+		"AGENT_AUTORESPONSE_DISABLED":  "/tmp/auto.off",
+		"AGENT_AUTORESPONSE_STALE_TTL": "9s",
+		"AGENT_AUTO_NEVER_QUARANTINE":  "/opt/app, /srv/data ,,",
+		"AGENT_MGMT_SUBNETS":           "192.0.2.0/24",
+	}
+	c := Load(func(k string) string { return env[k] })
+	if c.AutoResponseMode != "shadow" {
+		t.Errorf("mode should be lowercased/overlaid, got %q", c.AutoResponseMode)
+	}
+	if c.AutoResponseRateMax != 5 || c.AutoResponseRateWindow != 120*time.Second {
+		t.Errorf("auto rate overlay wrong: %d/%v", c.AutoResponseRateMax, c.AutoResponseRateWindow)
+	}
+	if c.AutoResponseDisabled != "/tmp/auto.off" {
+		t.Errorf("disarm latch overlay wrong: %q", c.AutoResponseDisabled)
+	}
+	if c.AutoStaleTTL != 9*time.Second {
+		t.Errorf("stale TTL overlay wrong: %v", c.AutoStaleTTL)
+	}
+	if len(c.AutoNeverQuarantine) != 2 || c.AutoNeverQuarantine[0] != "/opt/app" {
+		t.Errorf("never-quarantine overlay wrong: %v", c.AutoNeverQuarantine)
+	}
+	if len(c.MgmtSubnets) != 1 || c.MgmtSubnets[0] != "192.0.2.0/24" {
+		t.Errorf("mgmt subnets overlay wrong: %v", c.MgmtSubnets)
+	}
+}
+
+// An unparseable mode/TTL must fall back to the SAFE default, never silently
+// enable an unsupported configuration.
+func TestAutoResponseUnparseableFallsBackSafe(t *testing.T) {
+	c := Load(func(k string) string {
+		switch k {
+		case "AGENT_AUTORESPONSE_STALE_TTL":
+			return "not-a-duration"
+		}
+		return ""
+	})
+	if c.AutoStaleTTL != 5*time.Second {
+		t.Errorf("unparseable TTL must keep the safe 5s default, got %v", c.AutoStaleTTL)
+	}
+}

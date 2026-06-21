@@ -493,6 +493,135 @@ func TestExitClearsPidIndexNoMisattribution(t *testing.T) {
 	}
 }
 
+// Phase 4 G4 marker: a connect resolved by exec_id carries resolved=exec_id; a
+// pid-only connect (fallback) carries resolved=pid. The auto path keys G4 on this.
+func TestResolvedMarkerExecIDvsPid(t *testing.T) {
+	cfg := testCfg()
+
+	cl := newClock()
+	c := New(0, time.Hour, cl.now)
+	c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.x/payload", ExecID: "X", Pid: 1337}, cfg)
+	byExec := correlated(t, c.Process(tetragon.Event{Kind: "connect", ExecID: "X", Pid: 1337, Dst: "1.2.3.4", DstPort: 443}, cfg))
+	if !relatedHas(byExec.Related, "resolved=exec_id") {
+		t.Errorf("exec_id-resolved connect should mark resolved=exec_id: %v", byExec.Related)
+	}
+
+	cl2 := newClock()
+	c2 := New(0, time.Hour, cl2.now)
+	c2.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.x/payload", ExecID: "Y", Pid: 4242}, cfg)
+	// connect with the pid only (no exec_id) → pid fallback.
+	byPid := correlated(t, c2.Process(tetragon.Event{Kind: "connect", Pid: 4242, Dst: "3.3.3.3", DstPort: 1337}, cfg))
+	if !relatedHas(byPid.Related, "resolved=pid") {
+		t.Errorf("pid-fallback connect should mark resolved=pid: %v", byPid.Related)
+	}
+	if relatedHas(byPid.Related, "resolved=exec_id") {
+		t.Errorf("pid-fallback connect must NOT claim resolved=exec_id: %v", byPid.Related)
+	}
+}
+
+// Phase 4: the correlated finding carries a typed AutoMeta snapshot (exec_id,
+// pid, event-time, dst) so the auto path can identity-bind. Event Time is parsed
+// from the Tetragon event time string for the G6 freshness gate.
+func TestCorrelatedFindingCarriesAutoMeta(t *testing.T) {
+	cfg := testCfg()
+	cl := newClock()
+	c := New(0, time.Hour, cl.now)
+	c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.x/payload", ExecID: "X", Pid: 1337}, cfg)
+	evTime := "2026-06-20T12:00:01Z"
+	f := correlated(t, c.Process(tetragon.Event{Kind: "connect", ExecID: "X", Pid: 1337, Dst: "8.8.8.8", DstPort: 443, Time: evTime}, cfg))
+	if f.AutoMeta == nil {
+		t.Fatalf("correlated finding must carry AutoMeta: %+v", f)
+	}
+	if f.AutoMeta.ExecID != "X" || f.AutoMeta.Pid != 1337 {
+		t.Errorf("AutoMeta identity wrong: %+v", f.AutoMeta)
+	}
+	if f.AutoMeta.Dst != "8.8.8.8" || f.AutoMeta.DstPort != 443 {
+		t.Errorf("AutoMeta dst wrong: %+v", f.AutoMeta)
+	}
+	want, _ := time.Parse(time.RFC3339, evTime)
+	if !f.AutoMeta.DetectedAt.Equal(want) {
+		t.Errorf("AutoMeta.DetectedAt=%v want parsed event time %v", f.AutoMeta.DetectedAt, want)
+	}
+	// A non-correlated base finding never carries AutoMeta (omitempty pointer).
+	base := c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/y", ExecID: "Z", Pid: 5}, cfg)
+	if len(base) != 1 || base[0].AutoMeta != nil {
+		t.Errorf("base finding must not carry AutoMeta: %+v", base)
+	}
+}
+
+// Phase 4 §3.4: the correlated finding emits a base technique= line for EVERY
+// distinct suspicion (not just the primary), so the auto path can apply
+// precedence over the full set (e.g. bpf-load present).
+func TestCorrelatedFindingEmitsAllBaseTechniques(t *testing.T) {
+	cfg := testCfg()
+	cl := newClock()
+	c := New(0, time.Hour, cl.now)
+	// One exec_id with BOTH a staging exec (T1059) and a bpf load (T1014).
+	c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.x/payload", ExecID: "X", Pid: 1337}, cfg)
+	c.Process(tetragon.Event{Kind: "kprobe", Function: "security_bpf_prog_load", Binary: "/tmp/.x/payload", ExecID: "X", Pid: 1337}, cfg)
+	f := correlated(t, c.Process(tetragon.Event{Kind: "connect", ExecID: "X", Pid: 1337, Dst: "8.8.8.8", DstPort: 443}, cfg))
+	var techs []string
+	for _, r := range f.Related {
+		if strings.HasPrefix(r, "base technique=") {
+			techs = append(techs, strings.TrimPrefix(r, "base technique="))
+		}
+	}
+	hasT1059, hasT1014 := false, false
+	for _, tech := range techs {
+		if tech == "T1059" {
+			hasT1059 = true
+		}
+		if tech == "T1014" {
+			hasT1014 = true
+		}
+	}
+	if !hasT1059 || !hasT1014 {
+		t.Errorf("correlated finding should emit ALL base techniques (T1059+T1014), got %v", techs)
+	}
+}
+
+// Phase 4 #19 eviction pinning: an attacker flooding fresh CLEAN exec_ids at the
+// cap must NOT evict a suspicion-carrying procState before its connect arrives.
+// Clean states are evicted first; the suspicious one survives and still correlates.
+func TestEvictionPinsSuspiciousStates(t *testing.T) {
+	cfg := testCfg()
+	cl := newClock()
+	const cap = 4
+	c := New(cap, time.Hour, cl.now)
+
+	// One SUSPICIOUS process (staging exec).
+	c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.x/payload", ExecID: "SUS", Pid: 1}, cfg)
+	if _, ok := c.byExec["SUS"]; !ok {
+		t.Fatal("suspicious process should be tracked")
+	}
+	// Flood many CLEAN execs (benign, not under staging) — far more than the cap.
+	for i := 0; i < cap*20; i++ {
+		c.Process(tetragon.Event{Kind: "exec", Binary: "/usr/bin/ls", ExecID: fmt.Sprintf("CLEAN%d", i), Pid: uint32(1000 + i)}, cfg)
+		if c.Tracked() > cap {
+			t.Fatalf("tracked %d exceeds cap %d", c.Tracked(), cap)
+		}
+	}
+	// The suspicious state must have survived the clean flood (pinned).
+	if _, ok := c.byExec["SUS"]; !ok {
+		t.Fatal("eviction pinning failed: the suspicious procState was evicted by a clean flood")
+	}
+	// And it still correlates its later connect.
+	got := c.Process(tetragon.Event{Kind: "connect", ExecID: "SUS", Pid: 1, Dst: "8.8.8.8", DstPort: 443}, cfg)
+	if !hasCorrelated(got) {
+		t.Errorf("the pinned suspicious process should still correlate: %+v", got)
+	}
+}
+
+// relatedHas is a test helper mirroring the bridge's predicate.
+func relatedHas(related []string, s string) bool {
+	for _, r := range related {
+		if r == s {
+			return true
+		}
+	}
+	return false
+}
+
 // Defaults are applied when zero values are passed to New.
 func TestNewDefaults(t *testing.T) {
 	c := New(0, 0, nil)

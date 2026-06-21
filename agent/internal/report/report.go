@@ -95,6 +95,30 @@ type Finding struct {
 	Sigma      string   `json:"sigma,omitempty"`      // matching shipped Sigma rule
 	Confidence string   `json:"confidence,omitempty"` // low|medium|high
 	Related    []string `json:"related,omitempty"`    // corroborating evidence / lineage
+
+	// AutoMeta is agent-internal, typed identity metadata the correlator stamps
+	// onto a realtime.correlated finding so the auto-response DECISION layer
+	// (internal/respond) can bind a candidate action to a LIVE process identity
+	// (exec_id + /proc/<pid>/exe + event time + dst) instead of the
+	// attacker-influenced Path string. It is omitempty (a pointer) so every
+	// existing finding marshals byte-for-byte unchanged and the collector, which
+	// ignores unknown fields, is unaffected. It is NOT a guarantee any action
+	// runs — Increment 1 only decides and shadows; it never executes.
+	AutoMeta *AutoMeta `json:"auto_meta,omitempty"`
+}
+
+// AutoMeta carries the live-identity snapshot the auto-response bridge needs to
+// corroborate a finding's would-be target against live /proc (read-only). All
+// fields are captured on the single tail goroutine at correlation time and are
+// immutable thereafter (the bridge value-copies them per §4.7). DetectedAt is the
+// TETRAGON EVENT time (best-effort, parsed from the event), used for the G6
+// event-time freshness gate — not the receipt/wall-clock time.
+type AutoMeta struct {
+	ExecID     string    `json:"exec_id,omitempty"`
+	Pid        int       `json:"pid,omitempty"`
+	DetectedAt time.Time `json:"detected_at,omitempty"`
+	Dst        string    `json:"dst,omitempty"`
+	DstPort    int       `json:"dst_port,omitempty"`
 }
 
 // Report is the full output of one authwatch run.

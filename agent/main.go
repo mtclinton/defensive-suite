@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -157,6 +158,13 @@ func cmdPreflight(args []string) int {
 		cfg.CollectorURL = *collector
 	}
 
+	// Auto-response: canary/armed are NOT implemented in this build. Preflight
+	// fails fast on them so arming an executing mode is caught before run.
+	if _, modeErr := respond.ParseMode(cfg.AutoResponseMode); modeErr != nil {
+		fmt.Fprintf(os.Stderr, "<2>agentd: %v (configured mode %q)\n", modeErr, cfg.AutoResponseMode)
+		return 2
+	}
+
 	// Real, read-only implementations. Inputs with nil fields would also resolve
 	// to these; we pass them explicitly for clarity.
 	checks := preflight.Run(preflight.Inputs{
@@ -209,6 +217,18 @@ func cmdRun(args []string) int {
 	if *enableResp {
 		cfg.ResponseEnabled = true
 	}
+
+	// Phase 4 auto-response DECISION layer (Increment 1: decide + shadow + measure,
+	// NEVER execute). canary/armed are not implemented in this build: fail fast so
+	// an operator who configured an executing mode gets a clear error rather than a
+	// silent clamp. off|dry-run|shadow proceed; the bridge clamps any residual
+	// canary/armed to shadow (belt-and-suspenders).
+	autoMode, modeErr := respond.ParseMode(cfg.AutoResponseMode)
+	if modeErr != nil {
+		fmt.Fprintf(os.Stderr, "<2>agentd: %v (configured mode %q)\n", modeErr, cfg.AutoResponseMode)
+		return 2
+	}
+	bridge := respond.NewBridge(autoConfig(cfg, autoMode), time.Now, nil, nil)
 
 	buf := pipeline.NewBuffer(cfg.BufferMax)
 	// ONE stateful correlator drives the whole event stream so correlation works
@@ -330,10 +350,52 @@ func cmdRun(args []string) int {
 	fmt.Fprintf(os.Stderr, "agentd %s: tailing %s → %s (observe mode)\n",
 		version, cfg.TetragonLog, orNone(cfg.CollectorURL))
 	_ = pipeline.TailWithState(ctx, cfg.TetragonLog, statePath, time.Second, func(line string) {
-		buf.Add(corr.Line(line)...)
+		// §4.0/§6: a panic in correlation or the auto-response DECISION layer must
+		// NEVER kill TailWithState (the single detection goroutine). Recover, log,
+		// and carry on with the next line.
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "<3>agentd: recovered panic in tail callback: %v (detection continues)\n", r)
+			}
+		}()
+		findings := corr.Line(line)
+		buf.Add(findings...)
+		// The bridge only DECIDES + emits would-findings; it holds no executor and
+		// cannot take any action. Its output flows to the collector for the FP soak.
+		buf.Add(bridge.Consider(findings)...)
 	})
 	flush()
 	return 0
+}
+
+// autoConfig builds the auto-response DECISION config from the agent config. It
+// carries NO executor/responder — the Bridge is structurally inert.
+func autoConfig(cfg config.Config, mode respond.Mode) respond.AutoConfig {
+	return respond.AutoConfig{
+		Mode:            mode,
+		StagingDirs:     cfg.StagingDirs,
+		MgmtSubnets:     cfg.MgmtSubnets,
+		CollectorHost:   collectorHost(cfg.CollectorURL),
+		NeverQuarantine: cfg.AutoNeverQuarantine,
+		StaleTTL:        cfg.AutoStaleTTL,
+		RateMax:         cfg.AutoResponseRateMax,
+		RateWindow:      cfg.AutoResponseRateWindow,
+		DisablePath:     cfg.AutoResponseDisabled,
+	}
+}
+
+// collectorHost extracts the host (no port) from the collector URL so G7 can
+// treat the collector as a non-external destination. A blank/unparseable URL
+// yields "".
+func collectorHost(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 func orNone(s string) string {

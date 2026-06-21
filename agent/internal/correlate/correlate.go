@@ -205,13 +205,38 @@ func (c *Correlator) track(ev tetragon.Event) {
 // oldest-by-last-seen (least recently active) entry so the map stays bounded.
 // Ties on lastSeen are broken deterministically by execID (Go map iteration
 // order is non-deterministic), so eviction is reproducible.
+//
+// Eviction PINNING (#19, abuse #6): a process that already carries a suspicion
+// is the very thing the auto/correlation path exists to catch, so an attacker
+// flooding fresh CLEAN exec_ids must not be able to evict a real suspicious
+// procState before its connect arrives. We therefore evict from the CLEAN set
+// first (no suspicions), and only fall back to the suspicion-carrying set when
+// every tracked process is suspicious. Within each set the oldest-by-lastSeen
+// (execID tie-break) is chosen, preserving the existing determinism.
 func (c *Correlator) admit() {
 	if len(c.byExec) < c.maxProcs {
 		return
 	}
+	if k := c.oldestKey(false); k != "" { // prefer evicting a CLEAN state
+		c.forget(k)
+		return
+	}
+	if k := c.oldestKey(true); k != "" { // all are suspicious: evict the oldest
+		c.forget(k)
+	}
+}
+
+// oldestKey returns the oldest-by-lastSeen execID among tracked processes,
+// considering only those WITH suspicions when suspicious is true, else only
+// those WITHOUT. Ties on lastSeen break deterministically by execID. "" if the
+// chosen set is empty.
+func (c *Correlator) oldestKey(suspicious bool) string {
 	var oldestKey string
 	var oldest time.Time
 	for k, st := range c.byExec {
+		if (len(st.suspicious) > 0) != suspicious {
+			continue
+		}
 		switch {
 		case oldestKey == "":
 		case st.lastSeen.Before(oldest):
@@ -222,9 +247,7 @@ func (c *Correlator) admit() {
 		}
 		oldestKey, oldest = k, st.lastSeen
 	}
-	if oldestKey != "" {
-		c.forget(oldestKey)
-	}
+	return oldestKey
 }
 
 // evictExpired drops every process idle past the TTL (aged off lastSeen, not
@@ -289,7 +312,7 @@ func (c *Correlator) annotateAndArm(ev tetragon.Event, base []report.Finding) []
 // and the binary, with the lineage in Related. ok is false when there is no
 // recent suspicious process for this connect (→ no correlated finding).
 func (c *Correlator) correlateEgress(ev tetragon.Event) (report.Finding, bool) {
-	st := c.resolve(ev)
+	st, byExecID := c.resolve(ev)
 	if st == nil || len(st.suspicious) == 0 {
 		return report.Finding{}, false
 	}
@@ -353,34 +376,84 @@ func (c *Correlator) correlateEgress(ev tetragon.Event) (report.Finding, bool) {
 		Confidence: "high",
 	}
 	f.Related = append(f.Related, "base: "+primary.reason)
-	if primary.technique != "" {
-		f.Related = append(f.Related, "base technique="+primary.technique)
+	// Emit EVERY base technique line (not just the primary) so the auto-response
+	// decision layer can apply §3.4 precedence over the full suspicion SET (e.g.
+	// "any bpf-load present → force alert-only"). Deduped, preserving order.
+	seenTech := map[string]bool{}
+	for _, s := range st.suspicious {
+		if s.technique == "" || seenTech[s.technique] {
+			continue
+		}
+		seenTech[s.technique] = true
+		f.Related = append(f.Related, "base technique="+s.technique)
 	}
 	f.Related = append(f.Related, "dst="+dst)
+	// G4 marker (#6): record HOW the connect was attributed to its process —
+	// strictly by exec_id, or only by the pid fallback. The auto-response bridge
+	// REFUSES (degrades to alert-only) any finding not resolved by exec_id, so a
+	// forged pid-only connect can never reach an auto-action. This is a byte-on-
+	// the-wire marker so G4 is testable; it does NOT change detection behaviour.
+	if byExecID {
+		f.Related = append(f.Related, "resolved=exec_id")
+	} else {
+		f.Related = append(f.Related, "resolved=pid")
+	}
 	if lineage, ancestorFlagged := c.lineage(st); len(lineage) > 1 {
 		f.Related = append(f.Related, "lineage: "+strings.Join(lineage, " ← "))
 		if ancestorFlagged {
 			f.Related = append(f.Related, "ancestor previously flagged suspicious")
 		}
 	}
+	// Typed identity snapshot (#27) for the auto-response bridge: the connecting
+	// process's exec_id/pid, the TETRAGON EVENT time (best-effort parse, for the
+	// G6 event-time freshness gate), and the dst. The bridge corroborates this
+	// against live /proc read-only; it NEVER acts on Path. omitempty pointer →
+	// no effect on the wire for any non-correlated finding.
+	f.AutoMeta = &report.AutoMeta{
+		ExecID:     st.execID,
+		Pid:        int(ev.Pid),
+		DetectedAt: parseEventTime(ev.Time),
+		Dst:        ev.Dst,
+		DstPort:    ev.DstPort,
+	}
 	return f, true
 }
 
 // resolve finds the process state a connect event belongs to: by exec_id first,
 // then by the pid→exec_id index (handles export shapes where a connect carries a
-// pid but no exec_id).
-func (c *Correlator) resolve(ev tetragon.Event) *procState {
+// pid but no exec_id). byExecID reports whether attribution was by the stable
+// exec_id (true) or only by the weaker pid fallback (false), so the correlated
+// finding can carry the resolved= marker the auto path's G4 gate keys on.
+func (c *Correlator) resolve(ev tetragon.Event) (st *procState, byExecID bool) {
 	if ev.ExecID != "" {
 		if st := c.byExec[ev.ExecID]; st != nil {
-			return st
+			return st, true
 		}
 	}
 	if ev.Pid != 0 {
 		if ex, ok := c.pidIndex[ev.Pid]; ok {
-			return c.byExec[ex]
+			return c.byExec[ex], false
 		}
 	}
-	return nil
+	return nil, false
+}
+
+// parseEventTime best-effort parses a Tetragon event Time string (RFC3339 /
+// RFC3339Nano) into a time.Time for the G6 event-time freshness gate. An empty
+// or unparseable time yields the zero Time; the bridge treats a zero DetectedAt
+// as "no trustworthy event time" and degrades that finding to alert-only (G6
+// fails closed) rather than trusting wall-clock-at-receipt.
+func parseEventTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // lineage walks the parent-exec_id chain from st up to the root (bounded depth),

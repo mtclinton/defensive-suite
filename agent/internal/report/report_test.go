@@ -246,3 +246,43 @@ func TestEmitJournalSanitizesControlChars(t *testing.T) {
 		t.Errorf("control char in Path forged extra line(s); got %d lines:\n%s", len(lines), buf.String())
 	}
 }
+
+// A Finding without AutoMeta must marshal WITHOUT an auto_meta key (omitempty
+// pointer), so every existing finding and the collector are byte-for-byte
+// unaffected by the new agent-internal field.
+func TestFindingAutoMetaOmitEmpty(t *testing.T) {
+	f := Finding{Check: "realtime.exec", Severity: SeverityMedium, Title: "x"}
+	b, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "auto_meta") {
+		t.Errorf("a finding with no AutoMeta must omit auto_meta: %s", b)
+	}
+}
+
+// When set, AutoMeta marshals/round-trips its typed identity fields.
+func TestFindingAutoMetaRoundTrip(t *testing.T) {
+	when := time.Date(2026, 6, 20, 12, 0, 1, 0, time.UTC)
+	f := Finding{
+		Check:    "realtime.correlated",
+		Severity: SeverityCritical,
+		Title:    "c",
+		AutoMeta: &AutoMeta{ExecID: "X", Pid: 1337, DetectedAt: when, Dst: "8.8.8.8", DstPort: 443},
+	}
+	b, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "auto_meta") {
+		t.Errorf("a finding WITH AutoMeta must include auto_meta: %s", b)
+	}
+	var back Finding
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.AutoMeta == nil || back.AutoMeta.ExecID != "X" || back.AutoMeta.Pid != 1337 ||
+		!back.AutoMeta.DetectedAt.Equal(when) || back.AutoMeta.Dst != "8.8.8.8" || back.AutoMeta.DstPort != 443 {
+		t.Errorf("AutoMeta round-trip wrong: %+v", back.AutoMeta)
+	}
+}

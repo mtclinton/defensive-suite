@@ -79,6 +79,39 @@ type Config struct {
 	ResponseRateMax int
 	// ResponseRateWindow is the sliding window over which ResponseRateMax applies.
 	ResponseRateWindow time.Duration
+
+	// --- Phase 4 AUTO-RESPONSE (decision layer only; NEVER executes in this
+	// build). All defaults are SAFE: mode off, and any unparseable value falls
+	// back to off/safe. canary/armed are NOT buildable yet — the run/preflight
+	// paths hard-error on them and the bridge clamps to shadow. ---
+
+	// AutoResponseMode selects the auto-response ladder rung: off|dry-run|shadow
+	// (and the not-yet-implemented canary|armed). Default off → Consider is a
+	// no-op. Unparseable → off.
+	AutoResponseMode string
+	// AutoResponseRateMax / AutoResponseRateWindow are the AUTO path's OWN rate
+	// budget (separate from the manual ResponseRate*), default 3/300s. On
+	// exhaustion the auto path throttles (emits one throttled finding per window)
+	// — it NEVER touches the shared manual kill-switch.
+	AutoResponseRateMax    int
+	AutoResponseRateWindow time.Duration
+	// AutoResponseDisabled is the AUTO-ONLY disarm latch path. When this file
+	// EXISTS the auto decision path is throttled (alert-only). It is DISTINCT from
+	// ResponseKillSwitch (which is operator-only and disarms MANUAL response too);
+	// the auto path must never trip the shared switch. Default
+	// /run/agentd/autoresponse.disabled.
+	AutoResponseDisabled string
+	// AutoStaleTTL is the G6 event-time freshness cutoff: a correlated finding
+	// whose Tetragon event time is older than this (vs the clock) is not auto-
+	// eligible. Default 5s.
+	AutoStaleTTL time.Duration
+	// AutoNeverQuarantine is the operator-extendable never-touch denylist of
+	// realpaths (or path prefixes) the auto path must never select as a target,
+	// beyond the built-in protected set.
+	AutoNeverQuarantine []string
+	// MgmtSubnets are CIDRs (in addition to RFC1918/CGNAT/link-local/loopback)
+	// the G7 destination-class gate treats as NON-external (ineligible for auto).
+	MgmtSubnets []string
 }
 
 // Defaults returns a safe baseline for a single Linux workstation.
@@ -151,6 +184,22 @@ func Defaults() Config {
 		ResponseKillSwitch: "/run/agentd/response.disabled",
 		ResponseRateMax:    10,
 		ResponseRateWindow: 60 * time.Second,
+
+		// Phase 4 auto-response: SAFE defaults. Mode off → the decision layer is a
+		// no-op (no behaviour change). The auto rate budget is the auto path's OWN
+		// (3 per 300s), independent of the manual budget above. The auto-only disarm
+		// latch lives on tmpfs alongside the manual kill-switch but is a DISTINCT
+		// file: tripping it never disarms manual response.
+		AutoResponseMode:       "off",
+		AutoResponseRateMax:    3,
+		AutoResponseRateWindow: 300 * time.Second,
+		AutoResponseDisabled:   "/run/agentd/autoresponse.disabled",
+		AutoStaleTTL:           5 * time.Second,
+		AutoNeverQuarantine:    nil,
+		// Sensible private defaults: the operator's likely mgmt ranges. G7 already
+		// rejects all RFC1918/CGNAT/link-local independently, so these are belt-and-
+		// suspenders for any additionally-routed mgmt space.
+		MgmtSubnets: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"},
 	}
 }
 
@@ -206,6 +255,31 @@ func Load(getenv func(string) string) Config {
 		if max, win, ok := parseRate(v, c.ResponseRateWindow); ok {
 			c.ResponseRateMax, c.ResponseRateWindow = max, win
 		}
+	}
+	// --- Phase 4 auto-response env (all default-safe; unparseable → off/safe) ---
+	if v := getenv("AGENT_AUTORESPONSE_MODE"); v != "" {
+		// Normalize; an unrecognized value stays "off" (fail-safe). The bridge's
+		// own parser is the authority on which modes are buildable.
+		c.AutoResponseMode = strings.ToLower(strings.TrimSpace(v))
+	}
+	if v := getenv("AGENT_AUTORESPONSE_RATE"); v != "" {
+		if max, win, ok := parseRate(v, c.AutoResponseRateWindow); ok {
+			c.AutoResponseRateMax, c.AutoResponseRateWindow = max, win
+		}
+	}
+	if v := getenv("AGENT_AUTORESPONSE_DISABLED"); v != "" {
+		c.AutoResponseDisabled = v
+	}
+	if v := getenv("AGENT_AUTORESPONSE_STALE_TTL"); v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil && d > 0 {
+			c.AutoStaleTTL = d
+		}
+	}
+	if v := getenv("AGENT_AUTO_NEVER_QUARANTINE"); v != "" {
+		c.AutoNeverQuarantine = splitList(v)
+	}
+	if v := getenv("AGENT_MGMT_SUBNETS"); v != "" {
+		c.MgmtSubnets = splitList(v)
 	}
 	return c
 }
