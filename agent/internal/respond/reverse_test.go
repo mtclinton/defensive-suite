@@ -28,7 +28,7 @@ func TestValidateUnquarantine(t *testing.T) {
 		origin string
 		ok     bool
 	}{
-		{"under quarantine dir, abs origin", "/var/lib/agentd/quarantine/123-payload", "/tmp/.x/payload", true},
+		{"under quarantine dir, staging origin", "/var/lib/agentd/quarantine/123-payload", "/tmp/.x/payload", true},
 		{"target NOT under quarantine dir", "/etc/passwd", "/tmp/x", false},
 		{"target relative", "quarantine/x", "/tmp/x", false},
 		{"empty target", "", "/tmp/x", false},
@@ -36,6 +36,8 @@ func TestValidateUnquarantine(t *testing.T) {
 		{"relative origin", "/var/lib/agentd/quarantine/123-payload", "tmp/x", false},
 		{"origin into critical path refused", "/var/lib/agentd/quarantine/123-passwd", "/etc/passwd", false},
 		{"origin into /usr refused", "/var/lib/agentd/quarantine/x", "/usr/bin/ls", false},
+		{"origin in /dev/shm staging allowed", "/var/lib/agentd/quarantine/x", "/dev/shm/.x/payload", true},
+		{"origin in /var/tmp staging allowed", "/var/lib/agentd/quarantine/x", "/var/tmp/build/payload", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -45,6 +47,48 @@ func TestValidateUnquarantine(t *testing.T) {
 				t.Errorf("Validate(%+v) err=%v, want ok=%v", req, err, c.ok)
 			}
 		})
+	}
+}
+
+// FIX 1 (MAJOR) — unquarantine can clobber arbitrary sensitive files.
+// The OLD validateUnquarantine reused validateQuarantine's CriticalPaths denylist
+// (a quarantine-SOURCE filter) as the restore-DESTINATION filter, so an
+// authenticated socket caller could set origin to /root/.bashrc,
+// /home/<u>/.ssh/authorized_keys, or /var/spool/cron/crontabs/root — none under
+// the denylist — and have executor.unquarantine os.Rename CLOBBER that live file
+// with attacker-quarantined content (persistence / code-exec). The fix constrains
+// the origin to a POSITIVE StagingDir allowlist. These paths MUST now be refused.
+func TestValidateUnquarantineRefusesSensitiveDestinations(t *testing.T) {
+	g := reverseGuards()
+	const dst = "/var/lib/agentd/quarantine/123-evil"
+	refused := []struct {
+		name   string
+		origin string
+	}{
+		{"root dotfile", "/root/.bashrc"},
+		{"root authorized_keys", "/root/.ssh/authorized_keys"},
+		{"home authorized_keys", "/home/max/.ssh/authorized_keys"},
+		{"cron spool", "/var/spool/cron/crontabs/root"},
+		{"etc shadow", "/etc/shadow"},
+		{"opt app binary", "/opt/myapp/bin/server"},
+		{"srv data", "/srv/www/index.html"},
+		{"var lib not staging", "/var/lib/something/x"},
+	}
+	for _, c := range refused {
+		t.Run("refuse "+c.name, func(t *testing.T) {
+			req := Request{Action: ActionUnquarantine, Target: dst, Args: map[string]string{"origin": c.origin}}
+			if err := g.Validate(req); err == nil {
+				t.Fatalf("unquarantine origin %q MUST be refused (not staging-resident), got nil", c.origin)
+			}
+		})
+	}
+	// A StagingDir origin (the only legitimate auto-undo origin per §4.2/G5) is
+	// allowed — the manual reverse of a quarantine of a staged file.
+	for _, origin := range []string{"/tmp/.x/payload", "/dev/shm/dropper", "/var/tmp/cargo123/bin"} {
+		req := Request{Action: ActionUnquarantine, Target: dst, Args: map[string]string{"origin": origin}}
+		if err := g.Validate(req); err != nil {
+			t.Errorf("staging origin %q should be allowed, got %v", origin, err)
+		}
 	}
 }
 
@@ -207,6 +251,142 @@ func TestRealUnquarantineRestoresFile(t *testing.T) {
 	}
 	if b, err := os.ReadFile(origin); err != nil || string(b) != "malware" {
 		t.Errorf("origin contents=%q err=%v (want malware restored)", b, err)
+	}
+}
+
+// FIX 1 (executor branch) — unquarantine must REFUSE if the origin already
+// EXISTS so undo never CLOBBERS a live file. A quarantine of X then a recreated X
+// (a different, legitimate inode now living at the origin) must not be silently
+// overwritten by the restore.
+func TestRealUnquarantineRefusesExistingOrigin(t *testing.T) {
+	dir := t.TempDir()
+	qdir := filepath.Join(dir, "quarantine")
+	if err := os.MkdirAll(qdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(qdir, "123-payload")
+	if err := os.WriteFile(dst, []byte("quarantined-malware"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// A LIVE file already sits at the origin — restoring must refuse, not clobber.
+	origin := filepath.Join(dir, "live", "payload")
+	if err := os.MkdirAll(filepath.Dir(origin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(origin, []byte("LEGITIMATE-LIVE-CONTENT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := run
+	run = func(name string, args ...string) error { return nil }
+	defer func() { run = orig }()
+
+	e := NewRealExecutor(reverseGuards())
+	_, err := e.unquarantine(Request{Action: ActionUnquarantine, Target: dst, Args: map[string]string{"origin": origin}})
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("unquarantine over an existing origin must be refused, got err=%v", err)
+	}
+	// The live file is UNTOUCHED.
+	if b, _ := os.ReadFile(origin); string(b) != "LEGITIMATE-LIVE-CONTENT" {
+		t.Errorf("refused unquarantine must not clobber the live origin: %q", b)
+	}
+	// The quarantined copy is still in place (the move never happened).
+	if _, err := os.Stat(dst); err != nil {
+		t.Errorf("refused unquarantine should leave the quarantined copy in place: %v", err)
+	}
+}
+
+// FIX 2 (executor branch) — unquarantine os.Rename(dst, origin) FOLLOWS a symlink
+// at the destination. A pre-planted symlinked PARENT of the origin (e.g.
+// /staging/.ssh -> /root/.ssh) would redirect the restore to a privileged dir.
+// The executor Lstats the origin parent and refuses a symlinked parent; the
+// symlink target file must be left UNTOUCHED.
+func TestRealUnquarantineRefusesSymlinkedOriginParent(t *testing.T) {
+	dir := t.TempDir()
+	qdir := filepath.Join(dir, "quarantine")
+	if err := os.MkdirAll(qdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(qdir, "123-authorized_keys")
+	if err := os.WriteFile(dst, []byte("ssh-ed25519 ATTACKER implant\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	// The privileged dir the attacker wants the restore redirected INTO.
+	privDir := filepath.Join(dir, "root", ".ssh")
+	if err := os.MkdirAll(privDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	privFile := filepath.Join(privDir, "authorized_keys")
+	if err := os.WriteFile(privFile, []byte("ssh-ed25519 LEGIT operator\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Staging dir whose .ssh leaf is a SYMLINK to the privileged dir.
+	stagingSSH := filepath.Join(dir, "staging", ".ssh")
+	if err := os.MkdirAll(filepath.Dir(stagingSSH), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(privDir, stagingSSH); err != nil {
+		t.Fatal(err)
+	}
+	origin := filepath.Join(stagingSSH, "authorized_keys") // origin parent is a symlink
+
+	orig := run
+	run = func(name string, args ...string) error { return nil }
+	defer func() { run = orig }()
+
+	e := NewRealExecutor(reverseGuards())
+	_, err := e.unquarantine(Request{Action: ActionUnquarantine, Target: dst, Args: map[string]string{"origin": origin}})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("unquarantine into a symlinked origin parent must be refused, got err=%v", err)
+	}
+	// The privileged authorized_keys is UNTOUCHED — the implant did not land.
+	if b, _ := os.ReadFile(privFile); string(b) != "ssh-ed25519 LEGIT operator\n" {
+		t.Errorf("symlink redirect must not touch the privileged file: %q", b)
+	}
+}
+
+// FIX 2 — restoreKey os.WriteFile FOLLOWS a symlink at the path. A pre-planted
+// authorized_keys symlink (e.g. /staging/.ssh/authorized_keys ->
+// /root/.ssh/authorized_keys, with a sibling .dsuite.bak) would redirect the
+// write to a privileged file (SSH-key implantation). The executor opens the dest
+// O_NOFOLLOW + Lstats the leaf, refuses a symlink, and leaves the target UNTOUCHED.
+func TestRealRestoreKeyRefusesSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	// The privileged file the attacker wants implanted.
+	privFile := filepath.Join(dir, "root", "authorized_keys")
+	if err := os.MkdirAll(filepath.Dir(privFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(privFile, []byte("ssh-ed25519 LEGIT operator\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A symlinked restore target pointing at the privileged file, with a sibling
+	// .dsuite.bak carrying the attacker key.
+	stage := filepath.Join(dir, "stage")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(stage, "authorized_keys")
+	if err := os.Symlink(privFile, keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath+".dsuite.bak", []byte("ssh-ed25519 ATTACKER implant\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := run
+	run = func(name string, args ...string) error { return nil }
+	defer func() { run = orig }()
+
+	e := NewRealExecutor(reverseGuards())
+	_, err := e.restoreKey(Request{Action: ActionRestoreKey, Target: keyPath})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("restore-key onto a symlink must be refused, got err=%v", err)
+	}
+	// The privileged file is UNTOUCHED — the implant did not land through the link.
+	if b, _ := os.ReadFile(privFile); string(b) != "ssh-ed25519 LEGIT operator\n" {
+		t.Errorf("O_NOFOLLOW refusal must not touch the symlink target: %q", b)
 	}
 }
 

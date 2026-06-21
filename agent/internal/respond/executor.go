@@ -368,13 +368,33 @@ func (e *RealExecutor) quarantineFD(req Request) (Result, error) {
 		return Result{Action: req.Action, Target: req.Target}, err
 	}
 	dst := filepath.Join(dir, fmt.Sprintf("%d-%s", time.Now().UnixNano(), filepath.Base(src)))
-	if err := os.Rename(src, dst); err != nil {
+	if err := renameFn(src, dst); err != nil {
 		if errors.Is(err, syscall.EXDEV) {
-			if cerr := copyThenRemove(src, dst); cerr != nil {
+			// FIX 4 (cross-fs branch): a copy makes a NEW inode, so a post-move
+			// inode compare is meaningless. Instead RE-CONFIRM the source inode by
+			// fd immediately before copying — if src no longer holds the fstat'd
+			// (Ino,Dev) it was swapped between check and act, so REFUSE without
+			// touching it.
+			if cerr := copyConfirmedInode(src, dst, st); cerr != nil {
 				return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("quarantine-fd copy: %w", cerr)
 			}
 		} else {
 			return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("quarantine-fd move: %w", err)
+		}
+	} else {
+		// FIX 4 (rename branch): os.Rename moved a PATH STRING after we closed the
+		// fstat'd fd, so the inode validated is not PROVABLY the inode moved
+		// (TOCTOU; checked != acted, §4.2 #17). Re-fstat the MOVED file by fd
+		// (O_NOFOLLOW) and compare (Ino,Dev) to the pre-move values. On mismatch an
+		// attacker swapped the target between check and act: ROLL BACK (move it back
+		// to src) and REFUSE so we never lock down the wrong inode.
+		if merr := confirmMovedInode(dst, st); merr != nil {
+			if rberr := os.Rename(dst, src); rberr != nil {
+				return Result{Action: req.Action, Target: req.Target},
+					fmt.Errorf("quarantine-fd: %v; ROLLBACK FAILED (%v) — %q now at %q", merr, rberr, src, dst)
+			}
+			return Result{Action: req.Action, Target: req.Target},
+				fmt.Errorf("quarantine-fd: %w (rolled back to %q)", merr, src)
 		}
 	}
 	_ = run("chattr", "+i", dst)
@@ -398,13 +418,45 @@ func (e *RealExecutor) quarantineFD(req Request) (Result, error) {
 func (e *RealExecutor) unquarantine(req Request) (Result, error) {
 	dst := strings.TrimSpace(req.Target)
 	origin := strings.TrimSpace(req.arg("origin"))
+
+	// FIX 2 (checked FIRST): refuse a SYMLINKED final component of the origin's
+	// PARENT — a pre-planted symlink (e.g. /staging/.ssh -> /root/.ssh, or the
+	// origin's leaf dir being a symlink to a privileged dir) would otherwise
+	// redirect the rename to a privileged location. This is checked BEFORE the
+	// exists check so an attacker cannot bypass the symlink guard by pointing the
+	// parent symlink at a NON-existent privileged leaf (which would pass an
+	// exists-check and let the rename CREATE a file in the privileged dir). Lstat
+	// the parent and refuse if it is a symlink. Mirror quarantineFD's O_NOFOLLOW
+	// discipline on the reverse path.
+	parent := filepath.Dir(origin)
+	if pinfo, perr := os.Lstat(parent); perr != nil {
+		return Result{Action: req.Action, Target: req.Target},
+			fmt.Errorf("unquarantine: cannot stat origin parent %q: %w (refusing)", parent, perr)
+	} else if pinfo.Mode()&os.ModeSymlink != 0 {
+		return Result{Action: req.Action, Target: req.Target},
+			fmt.Errorf("unquarantine: origin parent %q is a symlink — refusing (would redirect the restore)", parent)
+	}
+
+	// FIX 1: REFUSE if the origin already exists — undo must never CLOBBER a live
+	// file. (Validate constrained the origin to a StagingDir, but a live file may
+	// have appeared at that path since; a quarantine of X then a recreated X must
+	// not be silently overwritten by the restore.) Lstat (not Stat) so a symlink
+	// AT the origin counts as "exists" and is refused, not followed.
+	if _, lerr := os.Lstat(origin); lerr == nil {
+		return Result{Action: req.Action, Target: req.Target},
+			fmt.Errorf("unquarantine: origin %q already exists — refusing to clobber a live file", origin)
+	} else if !os.IsNotExist(lerr) {
+		return Result{Action: req.Action, Target: req.Target},
+			fmt.Errorf("unquarantine: cannot stat origin %q: %w (refusing)", origin, lerr)
+	}
+
 	// chmod back to readable before the move (the quarantine set it 000) and drop
 	// the immutable bit; both best-effort, then the move is the load-bearing step.
 	_ = run("chattr", "-i", dst)
 	_ = os.Chmod(dst, 0o600)
 	if err := os.Rename(dst, origin); err != nil {
 		if errors.Is(err, syscall.EXDEV) {
-			if cerr := copyThenRemove(dst, origin); cerr != nil {
+			if cerr := copyThenRemoveNoFollow(dst, origin); cerr != nil {
 				return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("unquarantine copy: %w", cerr)
 			}
 		} else {
@@ -444,20 +496,48 @@ func (e *RealExecutor) deIsolate(req Request) (Result, error) {
 // .dsuite.bak backup. Target is the authorized_keys path; the backup is the same
 // .dsuite.bak revoke-key wrote.
 func (e *RealExecutor) restoreKey(req Request) (Result, error) {
-	path := strings.TrimSpace(req.Target)
-	backup := path + ".dsuite.bak"
+	keyPath := strings.TrimSpace(req.Target)
+	backup := keyPath + ".dsuite.bak"
 	data, err := os.ReadFile(backup)
 	if err != nil {
 		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("restore-key: read backup %q: %w", backup, err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("restore-key: write %q: %w", path, err)
+
+	// FIX 2: do NOT os.WriteFile the destination — that FOLLOWS a symlink at the
+	// path, so a pre-planted authorized_keys symlink (e.g. /staging/.ssh/
+	// authorized_keys -> /root/.ssh/authorized_keys) would redirect the write to a
+	// privileged file (SSH-key implantation). Mirror quarantineFD's O_NOFOLLOW
+	// discipline: Lstat the final component first and refuse a symlink, then open
+	// O_WRONLY|O_CREATE|O_TRUNC|O_NOFOLLOW and write BY FD so the file checked is the
+	// file written. O_NOFOLLOW alone refuses a symlinked leaf at open time; the
+	// pre-Lstat gives a precise refusal and also covers the (impossible-under-
+	// O_NOFOLLOW but defensive) race.
+	if li, lerr := os.Lstat(keyPath); lerr == nil {
+		if li.Mode()&os.ModeSymlink != 0 {
+			return Result{Action: req.Action, Target: req.Target},
+				fmt.Errorf("restore-key: target %q is a symlink — refusing (would redirect the write)", keyPath)
+		}
+	} else if !os.IsNotExist(lerr) {
+		return Result{Action: req.Action, Target: req.Target},
+			fmt.Errorf("restore-key: cannot stat target %q: %w (refusing)", keyPath, lerr)
+	}
+	f, oerr := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
+	if oerr != nil {
+		return Result{Action: req.Action, Target: req.Target},
+			fmt.Errorf("restore-key: open %q O_NOFOLLOW: %w (symlink — refusing)", keyPath, oerr)
+	}
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("restore-key: write %q: %w", keyPath, werr)
 	}
 	return Result{
 		OK:     true,
 		Action: req.Action,
 		Target: req.Target,
-		Detail: fmt.Sprintf("restored %q from %q", path, backup),
+		Detail: fmt.Sprintf("restored %q from %q", keyPath, backup),
 		Undo:   "", // its own inverse is to re-revoke
 	}, nil
 }
@@ -476,6 +556,13 @@ var run = func(name string, args ...string) error {
 	return nil
 }
 
+// renameFn is the rename used by quarantineFD's forward move. It is a var (default
+// os.Rename) ONLY so a FIX 4 test can perform a genuine inode SWAP in the TOCTOU
+// window between the fstat-confirmed open and the move, proving the post-move
+// inode confirm detects it and rolls back. Production always uses os.Rename;
+// nothing else overrides it.
+var renameFn = os.Rename
+
 // copyThenRemove moves a file ACROSS filesystems (where os.Rename returns EXDEV):
 // copy contents to dst, then remove src. On a copy failure dst is cleaned up and
 // src is left intact. Used by quarantine when the target and the quarantine dir
@@ -489,6 +576,98 @@ func copyThenRemove(src, dst string) error {
 	if err != nil {
 		_ = in.Close()
 		return err
+	}
+	_, cerr := io.Copy(out, in)
+	_ = in.Close()
+	if closeErr := out.Close(); cerr == nil {
+		cerr = closeErr
+	}
+	if cerr != nil {
+		_ = os.Remove(dst)
+		return cerr
+	}
+	return os.Remove(src)
+}
+
+// copyThenRemoveNoFollow is the cross-filesystem fallback for the REVERSE
+// actuators (FIX 2): it opens the DESTINATION with O_CREATE|O_EXCL|O_NOFOLLOW so a
+// pre-planted symlink at dst cannot redirect the write to a privileged file, and
+// O_EXCL guarantees we never clobber an existing file (the dst must not exist —
+// the caller already refused an existing origin). On any copy failure the partial
+// dst is removed and src is left intact.
+func copyThenRemoveNoFollow(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		_ = in.Close()
+		return fmt.Errorf("open dst O_NOFOLLOW|O_EXCL: %w", err)
+	}
+	_, cerr := io.Copy(out, in)
+	_ = in.Close()
+	if closeErr := out.Close(); cerr == nil {
+		cerr = closeErr
+	}
+	if cerr != nil {
+		_ = os.Remove(dst)
+		return cerr
+	}
+	return os.Remove(src)
+}
+
+// confirmMovedInode (FIX 4, rename branch) re-opens the just-moved file at dst
+// O_NOFOLLOW, fstats it BY FD, and confirms its (Ino,Dev) equals the pre-move
+// values fstat'd from the source fd — proving the inode we checked is the inode we
+// moved (checked==acted, §4.2 #17). A mismatch means the target was swapped
+// between the check (fstat) and the act (rename); an error means we cannot prove
+// identity. Either way it returns non-nil and the caller rolls back + refuses.
+func confirmMovedInode(dst string, want syscall.Stat_t) error {
+	f, err := os.OpenFile(dst, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("re-open moved file %q O_NOFOLLOW: %w (cannot confirm checked==acted)", dst, err)
+	}
+	var got syscall.Stat_t
+	ferr := syscall.Fstat(int(f.Fd()), &got)
+	_ = f.Close()
+	if ferr != nil {
+		return fmt.Errorf("re-fstat moved file %q: %w (cannot confirm checked==acted)", dst, ferr)
+	}
+	if got.Ino != want.Ino || got.Dev != want.Dev {
+		return fmt.Errorf("inode swap detected between check and act (moved inode %d/%d != checked %d/%d) — refusing",
+			got.Ino, got.Dev, want.Ino, want.Dev)
+	}
+	return nil
+}
+
+// copyConfirmedInode (FIX 4, cross-fs branch) re-opens src O_NOFOLLOW, fstats it
+// BY FD, and refuses unless its (Ino,Dev) still equals the pre-move values — so a
+// target swapped between check and act is detected before any copy. It then copies
+// FROM THAT EXACT FD (not by re-resolving the path) into a fresh O_EXCL|O_NOFOLLOW
+// dst, and only then removes src. A copy on a different filesystem necessarily
+// produces a new inode, so the post-move inode compare used by the rename branch
+// cannot apply here; confirming the source inode by fd before copying gives the
+// equivalent checked==acted guarantee for this branch.
+func copyConfirmedInode(src, dst string, want syscall.Stat_t) error {
+	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("re-open src %q O_NOFOLLOW: %w (cannot confirm checked==acted)", src, err)
+	}
+	var got syscall.Stat_t
+	if ferr := syscall.Fstat(int(in.Fd()), &got); ferr != nil {
+		_ = in.Close()
+		return fmt.Errorf("re-fstat src %q: %w (cannot confirm checked==acted)", src, ferr)
+	}
+	if got.Ino != want.Ino || got.Dev != want.Dev {
+		_ = in.Close()
+		return fmt.Errorf("inode swap detected between check and act (src inode %d/%d != checked %d/%d) — refusing",
+			got.Ino, got.Dev, want.Ino, want.Dev)
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		_ = in.Close()
+		return fmt.Errorf("open dst O_NOFOLLOW|O_EXCL: %w", err)
 	}
 	_, cerr := io.Copy(out, in)
 	_ = in.Close()

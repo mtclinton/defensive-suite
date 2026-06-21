@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,7 +104,8 @@ func TestServeResponseManualRoundTripAndAuditCloseOnCtxDone(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := serveResponse(ctx, cfg, r); err != nil {
+	var serveWG sync.WaitGroup
+	if err := serveResponse(ctx, cfg, r, &serveWG); err != nil {
 		t.Fatalf("serveResponse: %v", err)
 	}
 
@@ -146,14 +148,199 @@ func TestServeResponseManualRoundTripAndAuditCloseOnCtxDone(t *testing.T) {
 
 	// ctx.Done decouples the audit close: cmdRun closes the audit file at the top
 	// level after both consumers stop. Here we emulate that: cancel ctx (stops the
-	// serve goroutine), then close the audit file via the returned closer — it must
-	// close cleanly (no double-close / no panic), and a SECOND close is harmless.
+	// serve goroutine), JOIN the serve goroutine (FIX 3: serveWG.Wait, exactly as
+	// cmdRun does), then close the audit file via the returned closer — it must
+	// close cleanly (no double-close / no panic).
 	cancel()
-	// Give the serve goroutine a moment to shut down (it does NOT close the audit).
-	time.Sleep(50 * time.Millisecond)
+	serveWG.Wait() // FIX 3: join the serve goroutine BEFORE closing the audit file.
 	if err := closer.Close(); err != nil {
 		t.Errorf("top-level audit close on ctx.Done should succeed: %v", err)
 	}
+}
+
+// TestServeResponseAuditsInFlightResponseDuringShutdown is the FIX 3 abuse-path
+// test: a response that begins executing as ctx cancels must be FULLY audited —
+// its audit line must land BEFORE the audit file is closed (no
+// close-before-last-write, the §4.0 hazard). It drives a request whose audit write
+// is deliberately SLOW (a blocking io.Writer released only after ctx is cancelled),
+// then asserts cmdRun's ordering — serveWG.Wait() (join) THEN Close — captures that
+// write. Run under -race, a close-racing-the-write would also surface as a data
+// race / use-after-close.
+func TestServeResponseAuditsInFlightResponseDuringShutdown(t *testing.T) {
+	cfg := runCfg(t)
+	short, err := os.MkdirTemp("", "agt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(short) })
+	cfg.ResponseSocket = filepath.Join(short, "r.sock")
+	if cfg.ResponseToken == "" {
+		cfg.ResponseToken = "tok"
+	}
+
+	// A gate-able audit sink: the second audit write (the in-flight response's
+	// RESULT line) blocks until we cancel ctx, modelling a response whose audit
+	// write is still pending exactly as shutdown begins. The bytes must still be in
+	// the file after the (post-join) close.
+	gate := make(chan struct{})
+	sink := &gatedAuditSink{gateAfter: 2, gate: gate, writeDone: make(chan struct{}), blocked: make(chan struct{})}
+	guards := respond.DefaultGuards()
+	guards.QuarantineDir = cfg.QuarantineDir
+	r := respond.NewResponder(&respond.FakeExecutor{}, respond.NewAuditLog(sink), true, guards, time.Now)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var serveWG sync.WaitGroup
+	if err := serveResponse(ctx, cfg, r, &serveWG); err != nil {
+		t.Fatalf("serveResponse: %v", err)
+	}
+
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", cfg.ResponseSocket)
+		},
+	}, Timeout: 5 * time.Second}
+
+	// Fire the in-flight request in a goroutine — its RESULT audit write blocks in
+	// the handler (gatedAuditSink) until the gate releases. We deliberately do NOT
+	// synchronize on the request completing before Close: the JOIN (serveWG.Wait)
+	// must be the SOLE thing that guarantees the write lands before Close.
+	go func() {
+		body, _ := json.Marshal(respond.Request{Action: respond.ActionKill, Target: "4321"})
+		req, _ := http.NewRequest(http.MethodPost, "http://unix/respond", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+cfg.ResponseToken)
+		if resp, derr := client.Do(req); derr == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	// Wait until the handler is BLOCKED inside its final audit write, then begin
+	// shutdown — the classic close-before-last-write window. The handler is now
+	// stuck mid-Respond; srv.Shutdown (inside respond.Serve) must drain it.
+	sink.waitBlocked(t)
+	cancel()
+	// Release the blocked write a beat later, modelling the in-flight audit write
+	// completing WHILE srv.Shutdown drains. Until this fires, respond.Serve cannot
+	// return, so serveWG.Wait() below cannot return either.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		close(gate)
+	}()
+
+	// cmdRun's ordering (FIX 3): JOIN the serve goroutine — serveWG.Wait blocks
+	// until respond.Serve returns, which blocks until srv.Shutdown has drained the
+	// (still-blocked) handler, which only finishes after the gate releases its audit
+	// write. THEN close. So the in-flight write is captured BEFORE close. Without the
+	// join, Close would race the still-draining write → writes-after-close.
+	serveWG.Wait()
+	if err := sink.Close(); err != nil {
+		t.Errorf("audit close should succeed: %v", err)
+	}
+	// Settle: deterministically wait until the gated in-flight write has actually
+	// RETURNED before asserting, so a close-before-write (buggy ordering) is
+	// OBSERVABLE rather than racily missed. With the correct ordering this returns
+	// immediately (the write already completed before Close).
+	sink.waitWriteDone(t)
+	if sink.WritesAfterClose() != 0 {
+		t.Fatalf("UNAUDITED-ACTION HAZARD: %d audit writes landed AFTER close", sink.WritesAfterClose())
+	}
+	if sink.Writes() < 2 {
+		t.Fatalf("in-flight response should be fully audited (intent+result): got %d writes", sink.Writes())
+	}
+	if sink.Closes() != 1 {
+		t.Errorf("audit file must be closed EXACTLY once, got %d", sink.Closes())
+	}
+}
+
+// gatedAuditSink is an io.WriteCloser audit sink that BLOCKS its Nth write until a
+// gate channel closes (modelling an in-flight audit write during shutdown), and
+// records whether any write arrives AFTER Close (the close-before-last-write
+// hazard). It is concurrency-safe.
+type gatedAuditSink struct {
+	mu              sync.Mutex
+	buf             bytes.Buffer
+	writes          int
+	closes          int
+	closed          bool
+	writesAfter     int
+	gateAfter       int
+	gate            chan struct{}
+	blockedSignaled bool
+	blocked         chan struct{}
+	writeDone       chan struct{}
+	writeDoneOnce   sync.Once
+}
+
+func (g *gatedAuditSink) Write(p []byte) (int, error) {
+	g.mu.Lock()
+	g.writes++
+	n := g.writes
+	if g.blocked == nil {
+		g.blocked = make(chan struct{})
+	}
+	shouldBlock := n == g.gateAfter && g.gate != nil
+	if shouldBlock && !g.blockedSignaled {
+		g.blockedSignaled = true
+		close(g.blocked)
+	}
+	g.mu.Unlock()
+
+	if shouldBlock {
+		<-g.gate // block until shutdown releases us (the in-flight window)
+	}
+
+	// COMMIT the bytes only now. For the gated write this is AFTER the gate
+	// released, so if Close ran while we were blocked, closed==true here and the
+	// write is correctly counted as landing AFTER close (the hazard).
+	g.mu.Lock()
+	if g.closed {
+		g.writesAfter++
+	}
+	g.buf.Write(p)
+	g.mu.Unlock()
+
+	if shouldBlock {
+		g.signalWriteDone()
+	}
+	return len(p), nil
+}
+
+func (g *gatedAuditSink) signalWriteDone() {
+	g.writeDoneOnce.Do(func() { close(g.writeDone) })
+}
+
+func (g *gatedAuditSink) Close() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.closes++
+	g.closed = true
+	return nil
+}
+
+func (g *gatedAuditSink) waitBlocked(t *testing.T) {
+	t.Helper()
+	select {
+	case <-g.blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the in-flight audit write to block")
+	}
+}
+
+func (g *gatedAuditSink) waitWriteDone(t *testing.T) {
+	t.Helper()
+	select {
+	case <-g.writeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the in-flight audit write to complete")
+	}
+}
+
+func (g *gatedAuditSink) Writes() int { g.mu.Lock(); defer g.mu.Unlock(); return g.writes }
+func (g *gatedAuditSink) Closes() int { g.mu.Lock(); defer g.mu.Unlock(); return g.closes }
+func (g *gatedAuditSink) WritesAfterClose() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.writesAfter
 }
 
 // --- §E: cmdRun / cmdPreflight REFUSE canary/armed with the precondition list,

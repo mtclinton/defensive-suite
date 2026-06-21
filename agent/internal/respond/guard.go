@@ -21,6 +21,15 @@ type Guards struct {
 	// CriticalPaths is the denylist of path prefixes a quarantine must never
 	// touch (system dirs). "/" alone matches the root itself.
 	CriticalPaths []string
+	// StagingDirs is the POSITIVE allowlist of dirs an unquarantine ORIGIN must
+	// be resident under (§4.2/G5). The only legitimate auto-undo origin is a file
+	// that was quarantined FROM a StagingDir, and the manual reverse of such a
+	// quarantine is likewise staging-resident. This is the clean fix for the
+	// unquarantine-clobber surface: the quarantine-SOURCE CriticalPaths denylist is
+	// NOT a valid restore-DESTINATION filter (it permits /root/.bashrc,
+	// ~/.ssh/authorized_keys, /var/spool/cron/...), so unquarantine constrains the
+	// origin with this allowlist instead, never the denylist.
+	StagingDirs []string
 	// SelfPID is agentd's own PID; kill refuses it (and PID<=1).
 	SelfPID int
 }
@@ -37,6 +46,11 @@ func DefaultGuards() Guards {
 			"/bin", "/sbin", "/usr", "/lib", "/boot", "/etc",
 			// /lib* — /lib64, /libexec, etc. are covered by the prefix match below.
 		},
+		// The default staging set mirrors config.StagingDirs: the only dirs an
+		// unquarantine origin may legitimately land in. NOTE: /var/tmp is a staging
+		// dir, so the unquarantine origin filter must NOT use a blanket /var
+		// denylist — the StagingDirs allowlist is the correct control.
+		StagingDirs: []string{"/tmp", "/dev/shm", "/var/tmp"},
 	}
 }
 
@@ -220,10 +234,33 @@ func (g Guards) validateUnquarantine(req Request) error {
 	if !path.IsAbs(origin) {
 		return fmt.Errorf("unquarantine: origin %q must be an absolute path", origin)
 	}
-	// The restore target must itself be a permitted quarantine target (so undo
-	// cannot write a file back into a critical path). Reuse the quarantine guard on
-	// the origin path.
-	return g.validateQuarantine(Request{Action: ActionQuarantine, Target: origin})
+	// FIX 1: constrain the restore ORIGIN with a POSITIVE StagingDir allowlist —
+	// NOT the quarantine-SOURCE CriticalPaths denylist. The denylist (/proc,/sys,
+	// /dev,/bin,/sbin,/usr,/lib*,/boot,/etc,/) is a quarantine-source filter; reused
+	// as a restore-destination filter it PERMITS /root/.bashrc,
+	// /home/<u>/.ssh/authorized_keys, /var/spool/cron/crontabs/root — so an
+	// authenticated socket caller could unquarantine attacker-staged content over a
+	// live sensitive file (persistence / code-exec). The ONLY legitimate auto-undo
+	// origin (§4.2/G5) is a file that was quarantined FROM a StagingDir; the manual
+	// reverse of such a quarantine is likewise staging-resident. So the origin MUST
+	// be under a configured StagingDir. (The executor additionally refuses if the
+	// origin already EXISTS, so undo can never clobber a live file — that Lstat is
+	// I/O and lives at execute time.)
+	staging := g.StagingDirs
+	if len(staging) == 0 {
+		staging = DefaultGuards().StagingDirs
+	}
+	cleanOrigin := path.Clean(origin)
+	for _, d := range staging {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		if pathUnder(cleanOrigin, d) && path.Clean(d) != "/" {
+			return nil
+		}
+	}
+	return fmt.Errorf("unquarantine: refusing origin %q — not under a configured staging dir %v (restore destinations are allowlist-constrained, not denylist-filtered)", origin, staging)
 }
 
 // validateDeIsolate: the §4.6 reverse of isolate (nft delete the isolation

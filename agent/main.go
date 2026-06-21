@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -347,6 +348,13 @@ func cmdRun(args []string) int {
 	// the audit log can't be opened (a destructive action must never run unaudited).
 	var responder *respond.Responder
 	var auditCloser io.Closer
+	// serveWG joins the serve goroutine (FIX 3): respond.Serve only returns AFTER
+	// srv.Shutdown has DRAINED every in-flight handler (each of which may write a
+	// final audit line via Respond). The audit-file Close MUST be ordered AFTER that
+	// goroutine actually stops, or a response executing as ctx cancels can write its
+	// audit line AFTER Close — an UNAUDITED action, the exact §4.0 hazard. We Wait on
+	// serveWG before closing auditCloser so the close happens-after the last write.
+	var serveWG sync.WaitGroup
 	if cfg.ResponseSocket != "" {
 		r, closer, err := buildResponder(cfg)
 		if err != nil {
@@ -362,13 +370,16 @@ func cmdRun(args []string) int {
 			}
 		} else {
 			responder, auditCloser = r, closer
-			if serr := serveResponse(ctx, cfg, responder); serr != nil {
+			if serr := serveResponse(ctx, cfg, responder, &serveWG); serr != nil {
 				fmt.Fprintf(os.Stderr, "<3>agentd: response socket NOT served: %v (detection continues)\n", serr)
 			}
-			// Decouple auditFile.Close() from the serve goroutine: close it at the
-			// top level once ctx is done (after both consumers have stopped). This
-			// closes the §4.0 self-DoS where a post-close Respond writes unaudited.
+			// Decouple auditFile.Close() from the serve goroutine AND order it AFTER
+			// that goroutine has fully stopped (FIX 3). serveWG.Wait() blocks until
+			// respond.Serve has returned (srv.Shutdown drained), so the final audit
+			// write by an in-flight response happens-before this Close — no
+			// close-before-last-write, and the file is closed EXACTLY once.
 			defer func() {
+				serveWG.Wait()
 				if auditCloser != nil {
 					_ = auditCloser.Close()
 				}
@@ -502,6 +513,13 @@ func buildResponder(cfg config.Config) (*respond.Responder, io.Closer, error) {
 	guards.MgmtIfaces = cfg.MgmtIfaces
 	guards.QuarantineDir = cfg.QuarantineDir
 	guards.SelfPID = os.Getpid()
+	// FIX 1: the unquarantine restore-ORIGIN allowlist is the operator-configured
+	// staging set (the only legitimate auto-undo origin per §4.2/G5), not the
+	// quarantine-source CriticalPaths denylist. Fall back to DefaultGuards' staging
+	// set when config supplies none.
+	if len(cfg.StagingDirs) > 0 {
+		guards.StagingDirs = cfg.StagingDirs
+	}
 
 	// The single safety gate: DryRun is the NEGATION of ResponseEnabled. With
 	// ResponseEnabled=false (the default), DryRun=true → executor never runs.
@@ -529,8 +547,11 @@ func buildResponder(cfg config.Config) (*respond.Responder, io.Closer, error) {
 // already-built responder for the lifetime of ctx (§4.0: startResponse is now
 // just "serve the already-built responder"). It does NOT own the audit file's
 // lifecycle — that is closed at the top level on ctx.Done, decoupled from this
-// goroutine. The manual socket path behaves EXACTLY as before.
-func serveResponse(ctx context.Context, cfg config.Config, r *respond.Responder) error {
+// goroutine. The manual socket path behaves EXACTLY as before. wg (FIX 3) is the
+// join handle: serveResponse Add(1)s it and the serve goroutine Done()s it only
+// AFTER respond.Serve returns (after srv.Shutdown drains in-flight responses), so
+// cmdRun can Wait for the last audit write before closing the audit file.
+func serveResponse(ctx context.Context, cfg config.Config, r *respond.Responder, wg *sync.WaitGroup) error {
 	h := respond.NewHandler(r, cfg.ResponseToken, cfg.ResponseMaxBody)
 
 	ln, err := respond.Listen(cfg.ResponseSocket)
@@ -550,13 +571,18 @@ func serveResponse(ctx context.Context, cfg config.Config, r *respond.Responder)
 		fmt.Fprintf(os.Stderr, "agentd: response rate limit: %d live actions per %s\n", cfg.ResponseRateMax, cfg.ResponseRateWindow)
 	}
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done() // FIX 3: signal cmdRun ONLY after Serve (and srv.Shutdown's
+		// in-flight drain) has fully returned, so the audit-file Close is ordered
+		// strictly after the last in-flight Respond's audit write.
 		if err := respond.Serve(ctx, ln, h, cfg.ResponseSocket); err != nil {
 			fmt.Fprintln(os.Stderr, "agentd: response serve:", err)
 		}
 		// NOTE: the audit file is intentionally NOT closed here — it is owned by
 		// cmdRun and closed at the top level on ctx.Done (§4.0 decoupling), after
-		// every responder consumer has stopped.
+		// this goroutine (every responder consumer) has stopped — and cmdRun
+		// Wait()s on the WaitGroup before that Close.
 	}()
 	return nil
 }
