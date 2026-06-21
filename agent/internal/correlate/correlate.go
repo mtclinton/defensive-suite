@@ -22,6 +22,8 @@ package correlate
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -412,11 +414,64 @@ func (c *Correlator) correlateEgress(ev tetragon.Event) (report.Finding, bool) {
 	f.AutoMeta = &report.AutoMeta{
 		ExecID:     st.execID,
 		Pid:        int(ev.Pid),
+		StartTime:  procStartTime(int(ev.Pid)),
 		DetectedAt: parseEventTime(ev.Time),
 		Dst:        ev.Dst,
 		DstPort:    ev.DstPort,
 	}
 	return f, true
+}
+
+// procStartTime captures the connecting process's /proc/<pid>/stat starttime
+// (field 22) at AutoMeta-stamp time, so the auto-response bridge can re-check the
+// live process's (Pid, StartTime) and refuse a PID-reuse race (#27). The
+// correlator holds no other source of starttime (the Tetragon event shape it
+// consumes carries an exec_id but not starttime), so it is read from /proc here,
+// on the same tail goroutine, immediately at correlation. It is a package var so
+// tests (which run on a host with no matching /proc entry) can inject a value;
+// the default returns 0 on any failure and the bridge fails the bind closed.
+var procStartTime = realProcStartTime
+
+// procStatRoot is the /proc mount realProcStartTime reads from. A package var so
+// tests can point the real reader at a fabricated /proc tree.
+var procStatRoot = "/proc"
+
+// realProcStartTime reads field 22 (starttime) from /proc/<pid>/stat. Returns 0
+// on any read/parse failure (best-effort, fail-closed).
+func realProcStartTime(pid int) uint64 {
+	if pid <= 0 {
+		return 0
+	}
+	data, err := os.ReadFile(procStatRoot + "/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0
+	}
+	st, _ := parseStartTime(data)
+	return st
+}
+
+// parseStartTime extracts field 22 (starttime) from a /proc/<pid>/stat line. The
+// comm field (field 2) is parenthesized and may itself contain spaces/")", so we
+// split on the LAST ')' before counting space-separated fields, matching the
+// kernel's documented format. ok=false on any parse failure.
+func parseStartTime(data []byte) (uint64, bool) {
+	s := string(data)
+	close := strings.LastIndexByte(s, ')')
+	if close < 0 || close+1 >= len(s) {
+		return 0, false
+	}
+	// After comm: fields 3.. are space-separated. starttime is field 22, i.e.
+	// index 19 in the post-comm slice (field 3 == index 0).
+	rest := strings.Fields(s[close+1:])
+	const startTimeIdx = 19
+	if len(rest) <= startTimeIdx {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(rest[startTimeIdx], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // resolve finds the process state a connect event belongs to: by exec_id first,

@@ -2,6 +2,7 @@ package correlate
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -546,6 +547,79 @@ func TestCorrelatedFindingCarriesAutoMeta(t *testing.T) {
 	base := c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/y", ExecID: "Z", Pid: 5}, cfg)
 	if len(base) != 1 || base[0].AutoMeta != nil {
 		t.Errorf("base finding must not carry AutoMeta: %+v", base)
+	}
+}
+
+// FIX 2: the AutoMeta snapshot captures the connecting process's starttime (from
+// /proc/<pid>/stat at stamp time) so the auto-response bridge can identity-bind
+// (Pid, StartTime) and refuse a PID-reuse race. procStartTime is injected so the
+// capture is exercised without a matching real /proc entry.
+func TestCorrelatedFindingCapturesStartTime(t *testing.T) {
+	cfg := testCfg()
+	cl := newClock()
+	c := New(0, time.Hour, cl.now)
+
+	old := procStartTime
+	var askedPid int
+	procStartTime = func(pid int) uint64 {
+		askedPid = pid
+		if pid == 1337 {
+			return 424242
+		}
+		return 0
+	}
+	defer func() { procStartTime = old }()
+
+	c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.x/payload", ExecID: "X", Pid: 1337}, cfg)
+	f := correlated(t, c.Process(tetragon.Event{Kind: "connect", ExecID: "X", Pid: 1337, Dst: "8.8.8.8", DstPort: 443}, cfg))
+	if askedPid != 1337 {
+		t.Errorf("starttime should be captured for the connecting pid 1337, got %d", askedPid)
+	}
+	if f.AutoMeta == nil || f.AutoMeta.StartTime != 424242 {
+		t.Errorf("AutoMeta.StartTime not captured: %+v", f.AutoMeta)
+	}
+}
+
+// parseStartTime must read field 22 (starttime) from a /proc/<pid>/stat line
+// whose comm field itself contains spaces and ')' — the LAST ')' is the split
+// point. realProcStartTime must read it from a fabricated /proc tree and return 0
+// (fail closed) for an absent/invalid pid.
+func TestRealProcStartTimeParsesField22(t *testing.T) {
+	// comm "(weird ) name)" contains spaces and a ')'; starttime is field 22.
+	fields := []string{"S"} // field 3 (state)
+	for i := 4; i <= 21; i++ {
+		fields = append(fields, "0")
+	}
+	fields = append(fields, "987654") // field 22 = starttime
+	line := []byte("4242 (weird ) name) " + strings.Join(fields, " ") + "\n")
+
+	if got, ok := parseStartTime(line); !ok || got != 987654 {
+		t.Errorf("parseStartTime field-22 = (%d,%v) want (987654,true)", got, ok)
+	}
+	if _, ok := parseStartTime([]byte("garbage no paren")); ok {
+		t.Error("parseStartTime of a malformed line must fail")
+	}
+
+	// The real reader against a fabricated /proc tree.
+	root := t.TempDir()
+	old := procStatRoot
+	procStatRoot = root
+	defer func() { procStatRoot = old }()
+	pidDir := root + "/4242"
+	if err := os.MkdirAll(pidDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidDir+"/stat", line, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := realProcStartTime(4242); got != 987654 {
+		t.Errorf("realProcStartTime(4242) = %d want 987654", got)
+	}
+	if got := realProcStartTime(0); got != 0 {
+		t.Errorf("realProcStartTime(0) = %d want 0 (fail closed)", got)
+	}
+	if got := realProcStartTime(9999); got != 0 {
+		t.Errorf("realProcStartTime(absent) = %d want 0", got)
 	}
 }
 

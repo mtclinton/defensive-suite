@@ -268,7 +268,7 @@ func TestFindingAutoMetaRoundTrip(t *testing.T) {
 		Check:    "realtime.correlated",
 		Severity: SeverityCritical,
 		Title:    "c",
-		AutoMeta: &AutoMeta{ExecID: "X", Pid: 1337, DetectedAt: when, Dst: "8.8.8.8", DstPort: 443},
+		AutoMeta: &AutoMeta{ExecID: "X", Pid: 1337, StartTime: 424242, DetectedAt: when, Dst: "8.8.8.8", DstPort: 443},
 	}
 	b, err := json.Marshal(f)
 	if err != nil {
@@ -277,12 +277,22 @@ func TestFindingAutoMetaRoundTrip(t *testing.T) {
 	if !strings.Contains(string(b), "auto_meta") {
 		t.Errorf("a finding WITH AutoMeta must include auto_meta: %s", b)
 	}
+	if !strings.Contains(string(b), "start_time") {
+		t.Errorf("AutoMeta with a StartTime must marshal start_time: %s", b)
+	}
 	var back Finding
 	if err := json.Unmarshal(b, &back); err != nil {
 		t.Fatal(err)
 	}
 	if back.AutoMeta == nil || back.AutoMeta.ExecID != "X" || back.AutoMeta.Pid != 1337 ||
+		back.AutoMeta.StartTime != 424242 ||
 		!back.AutoMeta.DetectedAt.Equal(when) || back.AutoMeta.Dst != "8.8.8.8" || back.AutoMeta.DstPort != 443 {
 		t.Errorf("AutoMeta round-trip wrong: %+v", back.AutoMeta)
+	}
+	// A zero StartTime is omitted (omitempty) so existing findings are unaffected.
+	z, _ := json.Marshal(Finding{Check: "c", Severity: SeverityInfo, Title: "t",
+		AutoMeta: &AutoMeta{ExecID: "X", Pid: 1}})
+	if strings.Contains(string(z), "start_time") {
+		t.Errorf("a zero StartTime must be omitted: %s", z)
 	}
 }

@@ -2,6 +2,7 @@ package respond
 
 import (
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -49,8 +50,9 @@ func eligibleFinding() report.Finding {
 		AutoMeta: &report.AutoMeta{
 			ExecID:     "c",
 			Pid:        1337,
+			StartTime:  5000, // matches liveStagingProc's pid 1337 (G5 identity bind)
 			DetectedAt: testNow,
-			Dst:        "8.8.8.8:443",
+			Dst:        "8.8.8.8", // bare IP; port carried in DstPort + the dst= Related
 			DstPort:    443,
 		},
 	}
@@ -234,7 +236,9 @@ func TestG5DeadProcessAlertOnly(t *testing.T) {
 }
 
 func TestG5NonStagingResidentAlertOnly(t *testing.T) {
-	proc := fakeProc{1337: {Exe: "/opt/app/server", UID: 1000, Live: true}}
+	// StartTime matches AutoMeta so the identity bind passes and the STAGING gate
+	// is the one that fires (forged /opt finding).
+	proc := fakeProc{1337: {Exe: "/opt/app/server", UID: 1000, StartTime: 5000, Live: true}}
 	b := newTestBridge(baseAutoConfig(), proc)
 	if out := shadowFindings(b.Consider([]report.Finding{eligibleFinding()})); len(out) != 0 {
 		t.Errorf("a non-staging-resident exe must be alert-only (forged /opt finding): %+v", out)
@@ -242,11 +246,30 @@ func TestG5NonStagingResidentAlertOnly(t *testing.T) {
 }
 
 func TestG5ProtectedProcessAlertOnly(t *testing.T) {
-	// A staging-resident sshd is still protected (backstop).
-	proc := fakeProc{1337: {Exe: "/tmp/sshd", UID: 1000, Live: true}}
-	b := newTestBridge(baseAutoConfig(), proc)
+	// A process whose exe is at a REAL protected system path (here, also made
+	// staging-resident so the protected backstop — not the staging gate — is what
+	// fires) is alert-only. Protection is anchored to the real path, NOT a basename.
+	cfg := baseAutoConfig()
+	cfg.StagingDirs = append(cfg.StagingDirs, "/usr/sbin/")
+	proc := fakeProc{1337: {Exe: "/usr/sbin/sshd", UID: 1000, StartTime: 5000, Live: true}}
+	b := newTestBridge(cfg, proc)
 	if out := shadowFindings(b.Consider([]report.Finding{eligibleFinding()})); len(out) != 0 {
-		t.Errorf("a protected process must be alert-only: %+v", out)
+		t.Errorf("a protected process (real sshd path) must be alert-only: %+v", out)
+	}
+}
+
+// FIX 4: the inverse — a staging-resident dropper merely NAMED a protected
+// basename ("bash") must NOT be treated as protected, so it remains auto-eligible.
+// (The old basename-keyed protected set let this evade auto-eligibility.)
+func TestG5StagingExeNamedBashIsNotProtected(t *testing.T) {
+	proc := fakeProc{1337: {Exe: "/tmp/.x/bash", UID: 1000, StartTime: 5000, Live: true}}
+	b := newTestBridge(baseAutoConfig(), proc)
+	out := shadowFindings(b.Consider([]report.Finding{eligibleFinding()}))
+	if len(out) != 1 {
+		t.Fatalf("a staging dropper NAMED bash must NOT be protected (still auto-eligible): %+v", out)
+	}
+	if out[0].Title != "WOULD quarantine /tmp/.x/bash" {
+		t.Errorf("would-quarantine the staging /tmp bash, got title %q", out[0].Title)
 	}
 }
 
@@ -530,6 +553,119 @@ func TestActionDedupOnStableKey(t *testing.T) {
 	again.Path = "/tmp/freshname-9999" // attacker rename-per-exec
 	if out := shadowFindings(b.Consider([]report.Finding{again})); len(out) != 0 {
 		t.Errorf("a repeat to the same stable target/dst/lineage must dedup: %+v", out)
+	}
+}
+
+// FIX 3: a rename-per-exec /tmp storm — many findings with DISTINCT fresh /tmp
+// names (distinct resolved target paths) but the SAME dst + lineage-root — must
+// collapse to ONE auto-dedup unit. The dedup key excludes the volatile resolved
+// path; keying on it (the old bug) would burn one unit per process and defeat the
+// §4.5 #29 collapse.
+func TestActionDedupCollapsesRenamePerExecStorm(t *testing.T) {
+	cfg := baseAutoConfig()
+	cfg.RateMax = 100 // generous: prove DEDUP collapses the storm, not the rate budget
+	// One Bridge, with a resolver that hands back a FRESH /tmp name on each call
+	// (the rename-per-exec storm) while the dst (8.8.8.8:443) and lineage-root
+	// (sshd[a]) — the stable dedup attributes — stay identical.
+	var n int
+	rotating := procFn(func(pid int) procInfo {
+		n++
+		return procInfo{Pid: pid, Exe: "/tmp/.x/payload-" + strconv.Itoa(n), UID: 1000, StartTime: 5000, Live: true}
+	})
+	b := newTestBridge(cfg, rotating)
+	emitted := 0
+	for i := 0; i < 20; i++ {
+		emitted += len(shadowFindings(b.Consider([]report.Finding{eligibleFinding()})))
+	}
+	if emitted != 1 {
+		t.Errorf("rename-per-exec storm (same dst+lineage-root) must collapse to 1 auto-unit, got %d", emitted)
+	}
+}
+
+// FIX 2: a PID-reuse race — the live process at the captured PID has a DIFFERENT
+// starttime than the one captured at correlation — must degrade to alert-only.
+// PID is reusable; (Pid, StartTime) is the stable bind.
+func TestG5StartTimeMismatchAlertOnly(t *testing.T) {
+	// AutoMeta.StartTime is 5000 (eligibleFinding); the live proc reports 9999.
+	proc := fakeProc{1337: {Exe: "/tmp/.x/payload", UID: 1000, StartTime: 9999, Live: true}}
+	b := newTestBridge(baseAutoConfig(), proc)
+	if out := shadowFindings(b.Consider([]report.Finding{eligibleFinding()})); len(out) != 0 {
+		t.Errorf("a starttime mismatch (PID reuse) must be alert-only: %+v", out)
+	}
+}
+
+// FIX 2: a captured StartTime of 0 means /proc was unreadable at capture time —
+// we cannot identity-bind, so we fail closed to alert-only even if the live proc
+// looks fine.
+func TestG5ZeroCapturedStartTimeFailsClosed(t *testing.T) {
+	b := newTestBridge(baseAutoConfig(), liveStagingProc())
+	f := eligibleFinding()
+	f.AutoMeta.StartTime = 0
+	if out := shadowFindings(b.Consider([]report.Finding{f})); len(out) != 0 {
+		t.Errorf("a zero captured StartTime must fail the identity bind closed: %+v", out)
+	}
+}
+
+// FIX 2: a captured exec_id that mismatches a resolver-supplied exec_id degrades
+// to alert-only (the stronger bind when the resolver can supply exec_id).
+func TestG5ExecIDMismatchAlertOnly(t *testing.T) {
+	proc := fakeProc{1337: {Exe: "/tmp/.x/payload", UID: 1000, StartTime: 5000, ExecID: "different", Live: true}}
+	b := newTestBridge(baseAutoConfig(), proc)
+	if out := shadowFindings(b.Consider([]report.Finding{eligibleFinding()})); len(out) != 0 {
+		t.Errorf("an exec_id mismatch must be alert-only: %+v", out)
+	}
+	// Matching exec_id + starttime passes.
+	proc2 := fakeProc{1337: {Exe: "/tmp/.x/payload", UID: 1000, StartTime: 5000, ExecID: "c", Live: true}}
+	b2 := newTestBridge(baseAutoConfig(), proc2)
+	if out := shadowFindings(b2.Consider([]report.Finding{eligibleFinding()})); len(out) != 1 {
+		t.Errorf("a matching exec_id + starttime must be eligible: %+v", out)
+	}
+}
+
+// FIX 7: the shadow finding's dst AND the dedup key carry the ip:PORT, so the
+// shadow matches the source finding and per-port dedup works. AutoMeta.Dst is the
+// bare IP; the port comes from the dst= Related (or DstPort).
+func TestShadowDstIncludesPort(t *testing.T) {
+	b := newTestBridge(baseAutoConfig(), liveStagingProc())
+	out := shadowFindings(b.Consider([]report.Finding{eligibleFinding()}))
+	if len(out) != 1 {
+		t.Fatalf("want 1 shadow finding, got %+v", out)
+	}
+	if got := relatedValue(out[0].Related, "dst="); got != "8.8.8.8:443" {
+		t.Errorf("shadow dst=%q want ip:port 8.8.8.8:443", got)
+	}
+
+	// Per-port dedup: two findings to the SAME ip but DIFFERENT ports are distinct
+	// decisions (distinct dedup keys), so both emit — the bare-IP key would have
+	// wrongly collapsed them.
+	b2 := newTestBridge(baseAutoConfig(), liveStagingProc())
+	f1 := eligibleFinding()
+	f1.AutoMeta.Dst, f1.AutoMeta.DstPort = "8.8.8.8", 443
+	f1.Related = replaceRelated(f1.Related, "dst=8.8.8.8:443", "dst=8.8.8.8:443")
+	f2 := eligibleFinding()
+	f2.AutoMeta.Dst, f2.AutoMeta.DstPort = "8.8.8.8", 8443
+	f2.Related = replaceRelated(f2.Related, "dst=8.8.8.8:443", "dst=8.8.8.8:8443")
+	got := len(shadowFindings(b2.Consider([]report.Finding{f1})))
+	got += len(shadowFindings(b2.Consider([]report.Finding{f2})))
+	if got != 2 {
+		t.Errorf("two distinct ports to the same IP must be 2 distinct decisions, got %d", got)
+	}
+}
+
+// FIX 7: when AutoMeta carries only the bare IP + DstPort and there is no dst=
+// Related, dstWithPort composes ip:port. (Belt-and-suspenders for the compose
+// fallback path.)
+func TestDstWithPortComposesFromAutoMeta(t *testing.T) {
+	if got := dstWithPort(&report.AutoMeta{Dst: "8.8.8.8", DstPort: 443}, nil); got != "8.8.8.8:443" {
+		t.Errorf("dstWithPort compose = %q want 8.8.8.8:443", got)
+	}
+	// dst= Related is preferred when present.
+	if got := dstWithPort(&report.AutoMeta{Dst: "8.8.8.8", DstPort: 443}, []string{"dst=1.2.3.4:99"}); got != "1.2.3.4:99" {
+		t.Errorf("dstWithPort should prefer dst= Related, got %q", got)
+	}
+	// bare IP with no port → bare IP.
+	if got := dstWithPort(&report.AutoMeta{Dst: "8.8.8.8"}, nil); got != "8.8.8.8" {
+		t.Errorf("dstWithPort bare IP = %q want 8.8.8.8", got)
 	}
 }
 

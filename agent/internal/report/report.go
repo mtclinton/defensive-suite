@@ -114,8 +114,15 @@ type Finding struct {
 // TETRAGON EVENT time (best-effort, parsed from the event), used for the G6
 // event-time freshness gate — not the receipt/wall-clock time.
 type AutoMeta struct {
-	ExecID     string    `json:"exec_id,omitempty"`
-	Pid        int       `json:"pid,omitempty"`
+	ExecID string `json:"exec_id,omitempty"`
+	Pid    int    `json:"pid,omitempty"`
+	// StartTime is the connecting process's /proc/<pid>/stat field 22 (starttime,
+	// in clock ticks since boot) captured at correlation time. PID is reusable;
+	// (Pid, StartTime) is the stable per-boot identity the auto-response bridge
+	// re-checks against live /proc so a PID-reuse race cannot redirect a decision
+	// onto a different process. Zero when /proc was unreadable at capture (the
+	// bridge then fails the identity bind closed → alert-only).
+	StartTime  uint64    `json:"start_time,omitempty"`
 	DetectedAt time.Time `json:"detected_at,omitempty"`
 	Dst        string    `json:"dst,omitempty"`
 	DstPort    int       `json:"dst_port,omitempty"`

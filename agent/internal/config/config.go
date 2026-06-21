@@ -109,6 +109,12 @@ type Config struct {
 	// realpaths (or path prefixes) the auto path must never select as a target,
 	// beyond the built-in protected set.
 	AutoNeverQuarantine []string
+	// AutoProtectedPaths overrides the built-in protected-process set: ABSOLUTE
+	// on-disk paths (sshd/collector/login shells/systemd at their canonical
+	// locations) the auto path must never select as a target. Empty → the built-in
+	// defaults. Anchored to real paths, NOT attacker-choosable basenames, so a
+	// staging-resident dropper merely NAMED "bash" is not protected.
+	AutoProtectedPaths []string
 	// MgmtSubnets are CIDRs (in addition to RFC1918/CGNAT/link-local/loopback)
 	// the G7 destination-class gate treats as NON-external (ineligible for auto).
 	MgmtSubnets []string
@@ -277,6 +283,9 @@ func Load(getenv func(string) string) Config {
 	}
 	if v := getenv("AGENT_AUTO_NEVER_QUARANTINE"); v != "" {
 		c.AutoNeverQuarantine = splitList(v)
+	}
+	if v := getenv("AGENT_AUTO_PROTECTED_PATHS"); v != "" {
+		c.AutoProtectedPaths = splitList(v)
 	}
 	if v := getenv("AGENT_MGMT_SUBNETS"); v != "" {
 		c.MgmtSubnets = splitList(v)

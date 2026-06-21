@@ -3,6 +3,7 @@ package respond
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -101,6 +102,12 @@ type AutoConfig struct {
 	CollectorHost string // host (no port) of the collector, treated as non-external
 	// NeverQuarantine extends the protected-process backstop (§4.1).
 	NeverQuarantine []string
+	// ProtectedPaths are absolute on-disk paths the auto path must never select as
+	// a quarantine target (sshd/collector/login shells/systemd at their canonical
+	// locations). Empty → the built-in defaultProtectedPaths. Protection is
+	// anchored to these REAL paths, NOT to attacker-choosable basenames (§4.1): a
+	// staging-resident dropper merely NAMED "bash" is not protected.
+	ProtectedPaths []string
 	// StaleTTL is the G6 event-time freshness cutoff (default 5s).
 	StaleTTL time.Duration
 	// RateMax / RateWindow are the AUTO path's OWN budget (default 3/300s). On
@@ -121,6 +128,12 @@ type Bridge struct {
 	now      func() time.Time
 	existsFn func(string) bool // disarm-latch existence probe (injectable)
 	proc     procResolver      // /proc identity resolver (injectable)
+
+	// selfExe is the agentd binary's own resolved path (os.Executable), captured
+	// once so the auto path never quarantines agentd itself. protectedPaths is the
+	// effective protected absolute-path set (cfg.ProtectedPaths or the defaults).
+	selfExe        string
+	protectedPaths []string
 
 	mu sync.Mutex
 	// actionDedup keys completed would-actions on a STABLE attribute (resolved
@@ -152,12 +165,18 @@ func NewBridge(cfg AutoConfig, now func() time.Time, existsFn func(string) bool,
 	if cfg.StaleTTL <= 0 {
 		cfg.StaleTTL = 5 * time.Second
 	}
+	protectedPaths := cfg.ProtectedPaths
+	if len(protectedPaths) == 0 {
+		protectedPaths = defaultProtectedPaths
+	}
 	b := &Bridge{
-		cfg:         cfg,
-		now:         now,
-		existsFn:    existsFn,
-		proc:        proc,
-		actionDedup: make(map[string]bool),
+		cfg:            cfg,
+		now:            now,
+		existsFn:       existsFn,
+		proc:           proc,
+		selfExe:        selfExePath(),
+		protectedPaths: protectedPaths,
+		actionDedup:    make(map[string]bool),
 	}
 	for _, c := range cfg.MgmtSubnets {
 		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
@@ -261,12 +280,11 @@ func (b *Bridge) decide(f report.Finding) *decision {
 	}
 	d.gates = append(d.gates, "G6 fresh")
 
-	// G7 destination class: dst must be routable + external. We read the dst from
-	// AutoMeta first, falling back to the dst= Related marker.
-	dst := f.AutoMeta.Dst
-	if dst == "" {
-		dst = relatedValue(f.Related, "dst=")
-	}
+	// G7 destination class: dst must be routable + external. Prefer the ip:port
+	// form so the decision/shadow/dedup match the source finding and per-port dedup
+	// works (#7): use the dst= Related marker (which carries ip:port), then a
+	// composed AutoMeta.Dst:DstPort, then bare AutoMeta.Dst.
+	dst := dstWithPort(f.AutoMeta, f.Related)
 	d.dst = dst
 	if !b.dstIsExternal(dst) {
 		d.gates = append(d.gates, "G7 non-external/unparseable dst (fail → alert-only)")
@@ -274,28 +292,43 @@ func (b *Bridge) decide(f report.Finding) *decision {
 	}
 	d.gates = append(d.gates, "G7 external dst")
 
-	// G5 live, staging-resident, identity-bound, same-UID, non-protected target.
-	// Computed READ-ONLY from /proc — no acting. The connecting process's own
-	// exe is the target source; Finding.Path is NEVER trusted.
+	// G5 live, staging-resident, identity-bound, non-protected target. Computed
+	// READ-ONLY from /proc — no acting. The connecting process's own exe is the
+	// target source; Finding.Path is NEVER trusted.
 	target := b.proc.resolve(f.AutoMeta.Pid)
-	connecting := target // for Increment 1 the connecting proc IS the candidate
 	if !target.Live {
 		d.gates = append(d.gates, "G5 process not live (fail → alert-only)")
+		return d
+	}
+	// G4/G5 identity bind (#27): PID is reusable, so a PID-only resolve can land on
+	// a DIFFERENT process than the one G4 attributed. Require the live process's
+	// starttime to match the (Pid,StartTime) captured at correlation time, and the
+	// captured exec_id where the resolver can supply one. A captured StartTime of 0
+	// means /proc was unreadable at capture → we cannot identity-bind → degrade.
+	if f.AutoMeta.StartTime == 0 || target.StartTime != f.AutoMeta.StartTime {
+		d.gates = append(d.gates, "G5 identity mismatch (starttime; fail → alert-only)")
+		return d
+	}
+	if target.ExecID != "" && f.AutoMeta.ExecID != "" && target.ExecID != f.AutoMeta.ExecID {
+		d.gates = append(d.gates, "G5 identity mismatch (exec_id; fail → alert-only)")
 		return d
 	}
 	if !underStagingDir(target.Exe, b.cfg.StagingDirs) {
 		d.gates = append(d.gates, "G5 exe not under a staging dir (fail → alert-only)")
 		return d
 	}
-	if target.UID != connecting.UID {
-		d.gates = append(d.gates, "G5 UID mismatch (fail → alert-only)")
-		return d
-	}
-	if isProtectedExe(target, b.cfg.NeverQuarantine) {
+	// Same-UID gate (§4.1 #9): DEFERRED. In Increment 1 the quarantine target IS
+	// the connecting process's own exe, so any "target UID == connecting UID" check
+	// is a tautology (it would compare a value to itself and can never fire). We do
+	// NOT fake it. The real §4.1 #9 check — the target FILE's owner UID vs the
+	// connecting UID, for a target that DIFFERS from the connecting process —
+	// lands with the execution increment (which acts on a distinct inode by fd).
+	// TODO(phase4-exec): compare target-file owner UID against the connecting UID.
+	if isProtectedExe(target, b.selfExe, b.protectedPaths, b.cfg.NeverQuarantine) {
 		d.gates = append(d.gates, "G5 protected process (fail → alert-only)")
 		return d
 	}
-	d.gates = append(d.gates, "G5 live/staging/same-UID/non-protected target")
+	d.gates = append(d.gates, "G5 live/staging/identity-bound/non-protected target")
 	d.target = target.Exe
 
 	// G8 + §3.4 action selection over the FULL set of base techniques. Inspect
@@ -311,9 +344,13 @@ func (b *Bridge) decide(f report.Finding) *decision {
 		d.gates = append(d.gates, "G8/§3.4 base technique → alert-only")
 	}
 
-	// Stable dedup key (§4.5 #29): resolved target + dst + lineage-root, NOT the
-	// fresh /tmp name.
-	d.dedupKey = d.target + "|" + d.dst + "|" + lineageRoot(f.Related)
+	// Stable dedup key (§4.5 #29): dst (ip:port) + lineage-root exec_id ONLY. The
+	// resolved target path is DELIBERATELY excluded — it is volatile under a
+	// rename-per-exec /tmp storm (each exec resolves to a fresh /tmp name), so
+	// keying on it would let the storm burn one auto-unit per process instead of
+	// collapsing. dst+lineage-root is stable across the storm (same destination,
+	// same lineage-root exec_id), so the storm collapses to one auto-dedup unit.
+	d.dedupKey = d.dst + "|" + lineageRoot(f.Related)
 	return d
 }
 
@@ -497,6 +534,28 @@ func isPrivateOrCGNAT(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// dstWithPort returns the destination as ip:port so the shadow finding's dst AND
+// the dedup key match the source finding and per-port dedup works (#7). The
+// source correlated finding records the full ip:port in its "dst=" Related line,
+// while AutoMeta.Dst is the bare IP (port carried separately in DstPort). Prefer
+// the Related ip:port; else compose AutoMeta.Dst + ":" + DstPort; else fall back
+// to the bare AutoMeta.Dst (or the Related value) so an unparseable dst still
+// flows through to the G7 alert-only path.
+func dstWithPort(meta *report.AutoMeta, related []string) string {
+	if r := relatedValue(related, "dst="); r != "" {
+		return r
+	}
+	if meta != nil {
+		if meta.Dst != "" && meta.DstPort != 0 {
+			return net.JoinHostPort(meta.Dst, strconv.Itoa(meta.DstPort))
+		}
+		if meta.Dst != "" {
+			return meta.Dst
+		}
+	}
+	return ""
 }
 
 // --- Related-line helpers (parse, never trust as a target) ---

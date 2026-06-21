@@ -377,6 +377,7 @@ func autoConfig(cfg config.Config, mode respond.Mode) respond.AutoConfig {
 		MgmtSubnets:     cfg.MgmtSubnets,
 		CollectorHost:   collectorHost(cfg.CollectorURL),
 		NeverQuarantine: cfg.AutoNeverQuarantine,
+		ProtectedPaths:  cfg.AutoProtectedPaths,
 		StaleTTL:        cfg.AutoStaleTTL,
 		RateMax:         cfg.AutoResponseRateMax,
 		RateWindow:      cfg.AutoResponseRateWindow,
