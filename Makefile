@@ -32,7 +32,7 @@ BINDIR  := bin
 DISTDIR := dist
 RELEASE_ARCHES := amd64 arm64
 
-.PHONY: all build install release-local clean test lint tidy version console-keygen
+.PHONY: all build install release-local clean test lint tidy version console-keygen soak-start soak-report soak-stop
 
 all: build
 
@@ -96,6 +96,19 @@ console-keygen:
 	@echo "   3. The release job auto-enables createUpdaterArtifacts once the secret"
 	@echo "      is present; to build a signed AppImage locally, set createUpdaterArtifacts"
 	@echo "      true (or pass --config '{\"bundle\":{\"createUpdaterArtifacts\":true}}')."
+
+## soak-start — start the Phase 4 FP-soak (SHADOW mode; never acts). Linux + root.
+##   Run on the host you want to measure, >=14d with real build/CI/dev. See docs/PHASE4_FP_SOAK.md.
+soak-start:
+	@sudo ./validation/soak-start.sh $(FLAGS)
+
+## soak-report — read the soak's would-quarantine candidate metric + triage list (no root)
+soak-report:
+	@./validation/soak-report.sh
+
+## soak-stop — stop the soak (keeps collector data; --unload via FLAGS to drop the observe policy)
+soak-stop:
+	@sudo ./validation/soak-stop.sh $(FLAGS)
 
 ## version — print the version that would be injected
 version:

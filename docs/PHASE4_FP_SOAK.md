@@ -49,6 +49,20 @@ RFC1918 destinations ineligible; if they appear, that is itself a finding to inv
 
 ---
 
+## Turnkey (scripts)
+
+The steps below are scripted — on the host you want to measure:
+
+```sh
+sudo make soak-start     # build + load observe policy + run agentd MODE=shadow + collector
+make soak-report         # the would-quarantine candidate metric + triage list + verdict
+sudo make soak-stop      # end the soak (keeps the collector data for a final report)
+```
+
+(or `sudo ./validation/soak-start.sh`, `./validation/soak-report.sh`, `sudo ./validation/soak-stop.sh`.)
+`soak-start` is a self-contained quick start (nohup; dies on reboot); for a survive-reboot soak
+use the systemd path in §3. The rest of this doc is what those scripts do + how to read the result.
+
 ## 2. Prerequisites
 
 - Tetragon installed with JSON file export, the `tetra` CLI, and the **observe** policy
