@@ -46,7 +46,10 @@ threat-to-defense mapping lives in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md
 design/decision doc for evolving the suite into endpoint protection (EPP/EDR) is in
 [`docs/ENDPOINT_PROTECTION.md`](docs/ENDPOINT_PROTECTION.md), with the scoped Phase 1 build
 spec (Tetragon + agent + Tauri console + manual response) in
-[`docs/PHASE1_DESIGN.md`](docs/PHASE1_DESIGN.md).
+[`docs/PHASE1_DESIGN.md`](docs/PHASE1_DESIGN.md). The (not-yet-built) **Phase 4
+auto-response** policy — the design for acting on the correlation signal *without* a
+human, adversarially red-teamed before any code — is in
+[`docs/PHASE4_DESIGN.md`](docs/PHASE4_DESIGN.md).
 
 ## Build order
 
