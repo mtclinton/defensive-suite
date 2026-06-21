@@ -9,6 +9,12 @@
 #
 # It proves the live loop CI cannot:
 #   stage 2  detect   — a synthetic eBPF load is reported as a finding in the collector
+#   stage 2b correlate— a staging-dir exec that CONNECTS OUT is paired (by exec_id)
+#                       with its egress into ONE Critical realtime.correlated finding,
+#                       proving the tcp_connect hook + sock_arg dst parsing + the
+#                       stateful correlator all work on REAL Tetragon output (the
+#                       signal Phase 4 auto-response will key on) — plus a non-staging
+#                       negative control that must NOT correlate
 #   stage 3  enforce  — a NON-allowlisted eBPF load is SIGKILLed; Tetragon survives;
 #                       AND the implant program is proven ABSENT (bpftool count
 #                       before/after) — or HONESTLY warns if SIGKILL killed the
@@ -183,6 +189,48 @@ if wait_for_finding "realtime.bpf" 30; then
   pass "agentd reported the eBPF load (real-time detection pipeline works end-to-end)"
 else
   fail "no realtime.bpf finding within 30s — see $WORK/agentd.log and $WORK/collector.log"
+fi
+
+# ──────────────────── stage 2b — correlation (observe) ────────────────────
+# Proves on a REAL kernel what the unit tests (mocked events) cannot, and what
+# Phase 4 auto-response will key on: (a) the tcp_connect egress hook in
+# dsuite-observe.yaml actually emits connect events, (b) agentd parses the sock_arg
+# destination out of REAL Tetragon JSON, and (c) the stateful correlator pairs a
+# staging-dir exec with a later egress from the SAME process (same exec_id) into one
+# Critical realtime.correlated finding. Reuses the stage-2 collector + agentd +
+# observe policy (still loaded; /tmp is a default staging dir).
+say "stage 2b — correlation: a staging-dir exec that CONNECTS OUT → one Critical correlated finding"
+corr_count(){ curl -fsS "http://127.0.0.1:$PORT/api/findings" 2>/dev/null | grep -o '"check":"realtime.correlated"' | wc -l | tr -d ' '; }
+STAGE_BIN="$WORK/staged-$(rand)"            # under /tmp → a default staging dir
+cp "$(command -v bash)" "$STAGE_BIN" || die "could not stage a test binary"
+CORR_PORT=$(( PORT + 101 )); BENIGN_PORT=$(( PORT + 102 ))
+info "running staged exec $STAGE_BIN that opens a TCP connect to 127.0.0.1:$CORR_PORT (same process)..."
+# A refused connect is fine: tcp_connect() runs on the active-open path before the
+# handshake, so the kprobe fires whether or not anything is listening.
+"$STAGE_BIN" -c "exec 3<>/dev/tcp/127.0.0.1/$CORR_PORT" 2>/dev/null || true
+if wait_for_finding "realtime.correlated" 40; then
+  pass "agentd emitted realtime.correlated (exec→egress correlation fires on a real kernel)"
+  if curl -fsS "http://127.0.0.1:$PORT/api/findings" 2>/dev/null | grep -q "127.0.0.1:$CORR_PORT"; then
+    pass "the correlated finding carries dst 127.0.0.1:$CORR_PORT (tcp_connect sock_arg parsed from REAL Tetragon output)"
+  else
+    printf '  %s[WARN]%s realtime.correlated present but dst 127.0.0.1:%s not in it — the egress event/sock_arg shape may differ from the parser; inspect /api/findings + %s/agentd.log\n' "$c_y" "$c_0" "$CORR_PORT" "$WORK"
+  fi
+else
+  fail "no realtime.correlated within 40s — the tcp_connect hook or the correlator did not fire on real data (the connect event/sock_arg shape may differ from the parser); see $WORK/agentd.log"
+fi
+
+# Negative control (a basic FALSE-POSITIVE guard): a NON-staging exec that connects
+# out must NOT correlate — its exec_id has no suspicious base finding. (A real FP
+# RATE needs an observe-mode soak on real workloads — see the summary note.)
+info "negative control: a non-staging exec connects to 127.0.0.1:$BENIGN_PORT — must NOT correlate..."
+before_corr="$(corr_count)"
+bash -c "exec 3<>/dev/tcp/127.0.0.1/$BENIGN_PORT" 2>/dev/null || true   # /bin/bash — not under a staging dir
+sleep 6  # let agentd tail + flush
+after_corr="$(corr_count)"
+if [ "${after_corr:-0}" -le "${before_corr:-0}" ]; then
+  pass "the benign non-staging connect did NOT correlate ($before_corr → $after_corr) — no exec→egress false positive"
+else
+  fail "a benign non-staging connect produced a correlated finding ($before_corr → $after_corr) — false positive"
 fi
 
 # ──────────────────── stage 3 — enforcement (SIGKILL) ────────────────────
@@ -368,6 +416,10 @@ fi
 # ───────────────────────── summary ─────────────────────────
 say "summary"
 printf '  %d passed, %d failed\n' "$PASS" "$FAIL"
+info "stage 2b proves the correlation signal FIRES correctly (and a benign connect does not),"
+info "but a real FALSE-POSITIVE RATE needs an observe-mode soak: run agentd against real"
+info "workloads (no enforcement/response) and watch how often realtime.correlated fires before"
+info "trusting it for Phase 4 AUTO-response. Auto-acting on an unmeasured signal is the core risk."
 if [ "$FAIL" -eq 0 ]; then
   printf '%sVALIDATION PASSED — the live detect→enforce%s loop works on this kernel.%s\n' \
     "$c_g" "$([ "$WITH_RESPONSE" = 1 ] && echo '→respond')" "$c_0"

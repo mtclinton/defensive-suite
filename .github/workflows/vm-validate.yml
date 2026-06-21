@@ -73,6 +73,8 @@ jobs:
           sudo bash -c 'for f in /tmp/dsuite-validate.*/*.log /tmp/dsuite-validate.*/*.out; do [ -f "$f" ] && { echo "--- $f ---"; cat "$f"; }; done' || true
           echo "===== sample security_bpf_prog_load events in the Tetragon export (what agentd should parse) ====="
           sudo bash -c 'grep -m2 security_bpf_prog_load /var/log/tetragon/tetragon.log' 2>/dev/null || echo "(no security_bpf_prog_load line found in the export)"
+          echo "===== sample tcp_connect events (the REAL sock_arg shape agentd's connect parser must handle — for stage 2b) ====="
+          sudo bash -c 'grep -m2 tcp_connect /var/log/tetragon/tetragon.log' 2>/dev/null || echo "(no tcp_connect line found in the export)"
           echo "===== export size / lines ====="
           sudo bash -c 'wc -c /var/log/tetragon/tetragon.log; wc -l /var/log/tetragon/tetragon.log' 2>/dev/null || true
           echo "===== loaded tracing policies ====="; sudo tetra tracingpolicy list || true
