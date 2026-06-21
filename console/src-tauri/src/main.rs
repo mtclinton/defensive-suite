@@ -179,8 +179,20 @@ fn main() {
     builder
         .plugin(tauri_plugin_notification::init())
         // --- window-state: remembers the console's size + position across
-        // restarts (persists on close, restores on open) automatically. ---
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // restarts (persists on close, restores on open) automatically. We EXCLUDE
+        // the VISIBLE flag: window-state's restore runs in on_window_ready (when the
+        // window is built, BEFORE setup()), and with VISIBLE it would show+focus the
+        // window — flashing it on every "--hidden" login launch before setup() could
+        // hide it. We own visibility ourselves (config visible:false + setup
+        // show-if-not-hidden), so window-state restores only size/position. ---
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        & !tauri_plugin_window_state::StateFlags::VISIBLE,
+                )
+                .build(),
+        )
         // --- autostart: registers the LaunchAgent integration with the
         // "--hidden" launch arg so a login-launched console starts in the tray.
         // Whether it is actually enabled is decided per-run in setup() (on by
@@ -216,12 +228,21 @@ fn main() {
                 if let Ok(dir) = app.path().app_config_dir() {
                     let marker = dir.join(".initialized");
                     if !marker.exists() {
-                        let _ = std::fs::create_dir_all(&dir);
-                        // Enable always-on by default on first run; swallow any
-                        // error (e.g. no LaunchAgent dir) — autostart is a
-                        // convenience, never a hard requirement.
-                        let _ = app.autolaunch().enable();
-                        let _ = std::fs::write(&marker, b"1");
+                        // Persist the first-run marker BEFORE enabling, and enable
+                        // ONLY if it stuck. The marker lives in app_config_dir but
+                        // enable() writes the LaunchAgent elsewhere — if we enabled
+                        // first and the marker write failed, every later launch
+                        // would re-run this and re-enable autostart, overriding a
+                        // user's disable. Persisting first means a failed write just
+                        // skips the first-run default for that run (never a loop).
+                        if std::fs::create_dir_all(&dir).is_ok()
+                            && std::fs::write(&marker, b"1").is_ok()
+                        {
+                            // Enable always-on by default on first run; swallow any
+                            // error (e.g. no LaunchAgent dir) — autostart is a
+                            // convenience, never a hard requirement.
+                            let _ = app.autolaunch().enable();
+                        }
                     }
                 }
             }
@@ -277,13 +298,14 @@ fn main() {
                 .build(app)?;
 
             // --- launch-to-tray ---
-            // If launched at login (the autostart "--hidden" arg is present),
-            // start in the tray by hiding the main window. A manual launch (no
-            // flag) shows the window normally — which is the default, so we only
-            // act on the hidden case.
-            if std::env::args().any(|a| a == "--hidden") {
+            // The window is configured visible:false (and window-state no longer
+            // controls visibility), so it starts hidden and NEVER flashes. A normal
+            // launch SHOWS it; a login launch (the autostart "--hidden" arg) leaves
+            // it in the tray until the user clicks "Show console".
+            if !std::env::args().any(|a| a == "--hidden") {
                 if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.hide();
+                    let _ = w.show();
+                    let _ = w.set_focus();
                 }
             }
 
@@ -336,9 +358,21 @@ impl Finding {
     /// the identifying fields (not the volatile ones like confidence) so the
     /// same finding seen on a later poll dedupes to the same key.
     fn dedupe_key(&self) -> String {
+        // Include the destination: correlated network threats carry a "dst=..."
+        // line in related[], and their title+path are IDENTICAL across
+        // destinations ("suspicious process then connected out" + the binary). So
+        // without the dst a beaconing implant's SECOND C2 address would dedupe to
+        // the same key and be silently suppressed. Findings with no dst add an
+        // empty segment (key stays stable across polls, as before).
+        let dst = self
+            .related
+            .iter()
+            .find(|r| r.starts_with("dst="))
+            .map(String::as_str)
+            .unwrap_or("");
         format!(
-            "{}|{}|{}|{}|{}",
-            self.check, self.severity, self.title, self.path, self.technique
+            "{}|{}|{}|{}|{}|{}",
+            self.check, self.severity, self.title, self.path, self.technique, dst
         )
     }
 
