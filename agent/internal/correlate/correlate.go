@@ -463,9 +463,17 @@ func computeDwellMs(startTime uint64, detectedAt time.Time) (int64, bool) {
 	if !ok || boot <= 0 {
 		return 0, false
 	}
-	// Exec instant = boot + StartTime/USER_HZ. Compute the offset in nanoseconds
-	// to keep sub-second precision before converting to a wall-clock time.
-	offsetNs := (int64(startTime) * int64(time.Second)) / userHZ
+	// Exec instant = boot + StartTime/USER_HZ. Divide the ticks BEFORE scaling to
+	// nanoseconds: int64(startTime)*1e9 overflows int64 at long uptimes and could
+	// WRAP into a plausible-looking delta — fabricating a dwell, which this feature
+	// must never do. Recover sub-second precision from the remainder, and fail
+	// closed on a negative (int64 wrap) or absurd (>~100y) tick count.
+	secs := int64(startTime) / userHZ
+	fracTicks := int64(startTime) % userHZ
+	if secs < 0 || secs > 100*365*24*3600 {
+		return 0, false
+	}
+	offsetNs := secs*int64(time.Second) + fracTicks*(int64(time.Second)/userHZ)
 	execAt := time.Unix(boot, 0).Add(time.Duration(offsetNs))
 	d := detectedAt.Sub(execAt)
 	if d <= 0 || d > maxDwell {

@@ -817,6 +817,12 @@ func TestComputeDwellAndHumanDur(t *testing.T) {
 	if _, ok := computeDwellMs(15, exec.Add(maxDwell+time.Hour)); ok {
 		t.Error("computeDwellMs with an absurd delta must be omitted")
 	}
+	// Overflow-scale StartTime (long-uptime host): int64(startTime)*1e9 would
+	// overflow int64 and could wrap to a plausible delta — must fail closed and
+	// never fabricate a dwell.
+	if ms, ok := computeDwellMs(1<<60, exec.Add(time.Second)); ok {
+		t.Errorf("computeDwellMs with an overflow-scale StartTime must be omitted, got (%d,true)", ms)
+	}
 	// bootEpoch failure → omit (fail closed).
 	bootEpoch = func() (int64, bool) { return 0, false }
 	if _, ok := computeDwellMs(15, exec); ok {
