@@ -411,15 +411,116 @@ func (c *Correlator) correlateEgress(ev tetragon.Event) (report.Finding, bool) {
 	// G6 event-time freshness gate), and the dst. The bridge corroborates this
 	// against live /proc read-only; it NEVER acts on Path. omitempty pointer →
 	// no effect on the wire for any non-correlated finding.
+	startTime := procStartTime(int(ev.Pid))
+	detectedAt := parseEventTime(ev.Time)
 	f.AutoMeta = &report.AutoMeta{
 		ExecID:     st.execID,
 		Pid:        int(ev.Pid),
-		StartTime:  procStartTime(int(ev.Pid)),
-		DetectedAt: parseEventTime(ev.Time),
+		StartTime:  startTime,
+		DetectedAt: detectedAt,
 		Dst:        ev.Dst,
 		DstPort:    ev.DstPort,
 	}
+	// Dwell time (exec→egress): how long the connecting process was alive before
+	// it beaconed out. Computed from the process StartTime (clock ticks since
+	// boot) converted to wall-clock and subtracted from the egress event time
+	// (DetectedAt). Be HONEST about uncertainty: when it can't be computed
+	// (StartTime==0, /proc unreadable, no event time, or an out-of-range delta),
+	// DwellMs stays 0 and NO "dwell=" line is appended — we don't fabricate a
+	// number we can't stand behind.
+	if ms, ok := computeDwellMs(startTime, detectedAt); ok {
+		f.AutoMeta.DwellMs = ms
+		f.Related = append(f.Related, "dwell="+humanDur(ms))
+	}
 	return f, true
+}
+
+// USER_HZ is the kernel's clock-tick rate (CONFIG_HZ as exposed to userspace via
+// sysconf(_SC_CLK_TCK)). It is 100 on effectively every Linux kernel/arch the
+// suite runs on. A correct sysconf() lookup needs cgo, which this build forbids
+// (CGO_ENABLED=0), so we hardcode the universal value. If a target ever ran a
+// non-100-HZ kernel the dwell would be scaled, but the conservative guards in
+// computeDwellMs (and the honest-omit path) bound any error to a plausibly-sane
+// window rather than a fabricated one.
+const userHZ = 100
+
+// maxDwell bounds a believable exec→egress dwell. The correlator only arms for
+// the bounded TTL window, and a clock skew / btime misread could otherwise yield
+// an absurd (days/years) delta; anything past this is treated as uncomputable
+// and omitted rather than rendered as a bogus "dwell=".
+const maxDwell = 24 * time.Hour
+
+// computeDwellMs converts the process StartTime (clock ticks since boot) to
+// wall-clock (bootEpoch + StartTime/USER_HZ) and returns the milliseconds from
+// that exec instant to the egress event time (detectedAt). ok is false — and the
+// caller omits the dwell entirely — when any input is missing or the delta is
+// non-positive or implausibly large, so an uncomputable dwell is never faked.
+func computeDwellMs(startTime uint64, detectedAt time.Time) (int64, bool) {
+	if startTime == 0 || detectedAt.IsZero() {
+		return 0, false
+	}
+	boot, ok := bootEpoch()
+	if !ok || boot <= 0 {
+		return 0, false
+	}
+	// Exec instant = boot + StartTime/USER_HZ. Compute the offset in nanoseconds
+	// to keep sub-second precision before converting to a wall-clock time.
+	offsetNs := (int64(startTime) * int64(time.Second)) / userHZ
+	execAt := time.Unix(boot, 0).Add(time.Duration(offsetNs))
+	d := detectedAt.Sub(execAt)
+	if d <= 0 || d > maxDwell {
+		return 0, false // negative/absurd (clock skew, btime misread) → omit honestly
+	}
+	return d.Milliseconds(), true
+}
+
+// bootEpoch reads "btime" (seconds since the Unix epoch at boot) from
+// /proc/stat. It is a package var so tests can inject a deterministic boot time
+// without a real /proc. The default returns ok=false on any read/parse failure,
+// which fails the dwell computation closed (the dwell is then omitted).
+var bootEpoch = realBootEpoch
+
+// realBootEpoch reads the "btime <seconds>" line from /proc/stat (under
+// procStatRoot, shared with the starttime reader so tests fabricate one /proc
+// tree). Returns ok=false on any failure.
+func realBootEpoch() (int64, bool) {
+	data, err := os.ReadFile(procStatRoot + "/stat")
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "btime ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, false
+		}
+		v, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return v, true
+	}
+	return 0, false
+}
+
+// humanDur renders a dwell in milliseconds as a compact human string for the
+// dashboard's "dwell=" related[] line: sub-second as "NNNms", otherwise seconds
+// with one decimal ("1.4s"), minutes ("2.5m"), or hours ("1.2h").
+func humanDur(ms int64) string {
+	if ms < 1000 {
+		return strconv.FormatInt(ms, 10) + "ms"
+	}
+	secs := float64(ms) / 1000.0
+	switch {
+	case secs < 60:
+		return strconv.FormatFloat(secs, 'f', 1, 64) + "s"
+	case secs < 3600:
+		return strconv.FormatFloat(secs/60.0, 'f', 1, 64) + "m"
+	default:
+		return strconv.FormatFloat(secs/3600.0, 'f', 1, 64) + "h"
+	}
 }
 
 // procStartTime captures the connecting process's /proc/<pid>/stat starttime

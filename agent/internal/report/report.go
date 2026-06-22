@@ -126,6 +126,12 @@ type AutoMeta struct {
 	DetectedAt time.Time `json:"detected_at,omitempty"`
 	Dst        string    `json:"dst,omitempty"`
 	DstPort    int       `json:"dst_port,omitempty"`
+	// DwellMs is the exec→egress dwell time in milliseconds: how long the
+	// connecting process had been alive before this egress correlated (the
+	// process StartTime converted to wall-clock, subtracted from DetectedAt). It
+	// is 0/omitted when it cannot be honestly computed (StartTime unknown, /proc
+	// unreadable, or an out-of-range/negative delta) — never fabricated.
+	DwellMs int64 `json:"dwell_ms,omitempty"`
 }
 
 // Report is the full output of one authwatch run.

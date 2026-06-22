@@ -194,6 +194,17 @@
   .hero .R{position:relative;display:grid;place-items:center;border-left:1px solid var(--line2)}
   .hero.calm .R{display:none}
   .onom{font-family:var(--mono1);color:var(--ink-onom);font-size:38px;line-height:.9;text-align:center;transform:rotate(-8deg);text-shadow:3px 3px 0 var(--crit),6px 6px 0 rgba(0,0,0,.4)}
+  /* honest executed/egress/contained facts (correlated findings only) + dwell.
+     executed/egress are INHERENT to a correlated finding; contained is DATA-
+     DRIVEN (a related[] containment marker) — false today, so it renders ✗. */
+  .facts{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-family:var(--mono);font-size:10px;margin-top:7px}
+  .facts .fact{display:inline-flex;align-items:center;gap:4px;color:var(--muted)}
+  .facts .fact.yes b{color:var(--cyan)} .facts .fact.no b{color:var(--crit)}
+  .facts .fact .m{font-family:var(--mono1)}
+  .facts .dwell{margin-left:auto;color:var(--amber);border:1px solid var(--line2);border-radius:var(--r);padding:1px 7px;white-space:nowrap}
+  .stamp{position:absolute;top:12px;right:16px;font-family:var(--mono1);font-size:14px;font-weight:700;letter-spacing:.08em;
+    color:var(--crit);border:2px solid var(--crit);border-radius:var(--r);padding:3px 9px;transform:rotate(7deg);
+    text-shadow:1px 1px 0 rgba(0,0,0,.4);box-shadow:0 0 14px rgba(var(--ink-speed),.35);z-index:2;pointer-events:none}
 
   /* ---- feed: sober, recency-first, entity + glyph + time ---- */
   .feed{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);min-height:0;display:flex;flex-direction:column;overflow:hidden}
@@ -263,6 +274,9 @@
   .sec{font-family:var(--mono);font-size:10px;color:var(--violet2);text-transform:uppercase;letter-spacing:.12em;border-bottom:1px solid var(--line);padding-bottom:5px}
   .lin .step{font-family:var(--mono);font-size:11px;color:var(--muted);padding:1px 0;word-break:break-all} .lin .step::before{content:"↳ ";color:var(--faint)}
   .lin .step.chain{color:var(--violet2)}
+  /* drawer status line: same honest facts as the hero, laid out in the .kv .v */
+  .dfacts{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .dfacts .dwell{color:var(--amber);border:1px solid var(--line2);border-radius:var(--r);padding:1px 7px;font-size:11px}
   .drawer .acts{margin-top:2px}
 
   /* ---- a11y: VISIBLE keyboard focus rings (plan #10 / contrast pass).
@@ -490,7 +504,7 @@ const SAMPLE = [
      Base real-time findings carry a confidence; the correlator pairs a suspicious
      exec with a later egress from the SAME process (by exec_id) and escalates the
      pair into ONE Critical "connected out" C2 finding, with the process lineage. */
-  {tool:"agent", check:"realtime.correlated", severity:"critical", title:"suspicious process then connected out", detail:"/tmp/.cache/.x (execution from a staging directory) connected to 23.254.164.123:4444", path:"/tmp/.cache/.x", technique:"T1071", confidence:"high", related:["base: execution from a staging directory","base technique=T1059","dst=23.254.164.123:4444","lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]"]},
+  {tool:"agent", check:"realtime.correlated", severity:"critical", title:"suspicious process then connected out", detail:"/tmp/.cache/.x (execution from a staging directory) connected to 23.254.164.123:4444", path:"/tmp/.cache/.x", technique:"T1071", confidence:"high", related:["base: execution from a staging directory","base technique=T1059","dst=23.254.164.123:4444","dwell=1.4s","lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]"]},
   {tool:"agent", check:"realtime.exec", severity:"medium", title:"execution from a staging directory", detail:"/tmp/.cache/.x spawned under a world-writable path", path:"/tmp/.cache/.x", technique:"T1059", confidence:"low", related:["lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]"]},
   {tool:"agent", check:"realtime.bpf", severity:"high", title:"eBPF program loaded by an unrecognized loader", detail:"fn=security_bpf_prog_load loader=/tmp/.cache/.x pid=1337", path:"/tmp/.cache/.x", technique:"T1014", confidence:"medium"},
 
@@ -658,13 +672,24 @@ function renderHero(){
   // Parse the REAL related[] of a correlated finding:
   //   "dst=23.254.164.123:4444"                         → egress 4-tuple
   //   "lineage: .x[a91f2] ← bash[7c004] ← sshd[18820]"  → process chain
-  let dst="", lineageRaw="";
+  //   "dwell=1.4s"                                       → exec→egress dwell time
+  let dst="", lineageRaw="", dwell="";
+  // contained is DATA-DRIVEN, never fabricated: it is true ONLY if a related[]
+  // line marks containment. None is emitted today (the auto-response Bridge runs
+  // in shadow and structurally never executes), so this stays false and renders
+  // ✗ — and flips automatically if the backend ever emits a containment marker.
+  let contained=false;
   if(Array.isArray(f.related)){
     for(const r of f.related){
       if(/^dst=/.test(r)) dst = r.replace(/^dst=/,"").trim();
       if(/^lineage:/i.test(r)) lineageRaw = r.replace(/^lineage:\s*/i,"").trim();
+      if(/^dwell=/.test(r)) dwell = r.replace(/^dwell=/,"").trim();
+      if(/^contained(=|\b)/i.test(r) && !/=(false|no|0)$/i.test(r.trim())) contained=true;
     }
   }
+  // executed/egress are INHERENT to a realtime.correlated finding (its very
+  // definition: a suspicious exec that then connected OUT) — not a backend
+  // field, so render them ✓ for correlated findings only.
 
   // Build the directional chain from the lineage (sshd ← bash ← .x), reversed to
   // read exec-order (sshd → bash → .x → dst). Each node "name[id]".
@@ -691,11 +716,27 @@ function renderHero(){
   const hsev = `<span class="hsev"><span class="gly g-${esc(f.severity)}" aria-hidden="true">${GLY[f.severity]||"·"}</span>${esc((f.severity||"").toUpperCase())}</span>`;
   const att = f.technique ? `<span class="att">${esc(f.technique)}</span>` : "";
 
-  /* TODO(collector contract, UI_REFINEMENT_PLAN #4): when the backend surfaces
-     executed/egress/contained state + exec→egress dwell-time as Finding fields,
-     render a facts line ("executed ✓ · egress ✓ · contained ✗"), per-edge dwell
-     labels on the chain, and the "NOT CONTAINED" / "KILLED" impact-stamp here.
-     These do NOT exist in the schema today and are deliberately NOT fabricated. */
+  // Honest facts line + dwell + impact-stamp — ONLY for a correlated finding.
+  //   executed ✓ / egress ✓  : inherent to the correlated semantics (above).
+  //   contained ✗            : data-driven from related[]; false today (shadow
+  //                            Bridge never executes) → ✗ + "NOT CONTAINED".
+  //   dwell                  : rendered ONLY when a dwell= line was present.
+  // Every rendered value is esc()'d. Nothing here is fabricated: each fact is
+  // backed by a real related[] line or the realtime.correlated definition.
+  let facts="", stamp="";
+  if(isCorr){
+    const dwellLabel = dwell
+      ? `<span class="dwell" title="time from suspicious exec to egress">exec→egress in ${esc(dwell)}</span>`
+      : "";
+    facts =
+      `<div class="facts">`+
+        `<span class="fact yes"><span class="m">✓</span><b>executed</b></span>`+
+        `<span class="fact yes"><span class="m">✓</span><b>egress</b></span>`+
+        `<span class="fact ${contained?"yes":"no"}"><span class="m">${contained?"✓":"✗"}</span><b>contained</b></span>`+
+        dwellLabel+
+      `</div>`;
+    if(!contained) stamp = `<div class="stamp">NOT CONTAINED</div>`;
+  }
 
   // response actions — only attached/wired in the Tauri build (see respond IIFE).
   const acts = isCorr
@@ -710,12 +751,13 @@ function renderHero(){
   const onom = isCorr ? `<div class="R"><div class="speed" style="opacity:.22"></div><div class="onom">DODON</div></div>` : "";
 
   hero.innerHTML =
-    `<div class="speed"></div><div class="halftone"></div>
+    `<div class="speed"></div><div class="halftone"></div>${stamp}
      <div class="L">
        <div class="tagrow"><span class="ent ${ent.key}">${esc(ent.label)}</span>${hsev}${corrTag}${conf}${att}</div>
        <h1>${esc((f.title||"").toUpperCase())}</h1>
        ${f.detail?`<div class="hdetail">${esc(f.detail)}</div>`:""}
        ${chainHTML}
+       ${facts}
        ${acts}
      </div>${onom}`;
 
@@ -832,8 +874,23 @@ function openD(f){
            `</div>`;
          }).join("")+`</div>`;
   }
-  /* TODO(collector contract): if executed/egress/contained fields are ever
-     present on a finding, render the status line here. Not fabricated today. */
+  /* Honest status line (correlated findings only): executed ✓ / egress ✓ are
+     inherent to a realtime.correlated finding; contained is DATA-DRIVEN from a
+     related[] containment marker (none today → ✗); dwell is shown only when a
+     dwell= line is present. Every value is esc()'d; nothing is fabricated. */
+  if(f.check==="realtime.correlated"){
+    let dwell="", contained=false;
+    if(Array.isArray(f.related)) for(const r of f.related){
+      if(/^dwell=/.test(r)) dwell=r.replace(/^dwell=/,"").trim();
+      if(/^contained(=|\b)/i.test(r) && !/=(false|no|0)$/i.test(r.trim())) contained=true;
+    }
+    h += `<div class="kv"><div class="k">status</div><div class="v"><div class="dfacts">`+
+         `<span class="fact yes"><span class="m">✓</span><b>executed</b></span>`+
+         `<span class="fact yes"><span class="m">✓</span><b>egress</b></span>`+
+         `<span class="fact ${contained?"yes":"no"}"><span class="m">${contained?"✓":"✗"}</span><b>contained</b></span>`+
+         (dwell?`<span class="dwell">exec→egress in ${esc(dwell)}</span>`:"")+
+         `</div></div></div>`;
+  }
   if(Array.isArray(f.related)&&f.related.length){
     h += `<div class="sec">exec → egress lineage</div><div class="lin">`+
          f.related.map(r=>`<div class="step${/^lineage:/i.test(r)?" chain":""}">${esc(r)}</div>`).join("")+`</div>`;

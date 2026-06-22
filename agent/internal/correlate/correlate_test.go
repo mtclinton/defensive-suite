@@ -686,6 +686,191 @@ func TestEvictionPinsSuspiciousStates(t *testing.T) {
 	}
 }
 
+// dwellLine returns the parsed value of the single "dwell=" related[] line, and
+// whether exactly one such line is present.
+func dwellLine(related []string) (string, bool) {
+	var val string
+	var n int
+	for _, r := range related {
+		if strings.HasPrefix(r, "dwell=") {
+			val = strings.TrimPrefix(r, "dwell=")
+			n++
+		}
+	}
+	return val, n == 1
+}
+
+// Dwell time: a correlated exec→egress whose process StartTime and boot epoch
+// are both available carries AutoMeta.DwellMs > 0 AND a single human-readable
+// "dwell=" related[] line. When StartTime is unavailable (procStartTime returns
+// 0, e.g. /proc unreadable at capture) the honest-omit path engages: DwellMs==0
+// and NO "dwell=" line is appended — we never fabricate a dwell we can't compute.
+func TestCorrelatedFindingDwellTime(t *testing.T) {
+	cfg := testCfg()
+
+	// btime: boot at a fixed wall-clock so the conversion is deterministic.
+	// newClock() runs at 2026-06-20T12:00:00Z; put boot 3661s earlier so the
+	// dwell math is exercised against a real event time.
+	const bootSecs = int64(1_750_000_000) // arbitrary fixed epoch (seconds)
+	oldBoot := bootEpoch
+	bootEpoch = func() (int64, bool) { return bootSecs, true }
+	defer func() { bootEpoch = oldBoot }()
+
+	t.Run("computed when StartTime and btime available", func(t *testing.T) {
+		cl := newClock()
+		c := New(0, time.Hour, cl.now)
+
+		// Process exec'd 1.4s after boot (140 ticks at USER_HZ=100). The egress
+		// event fires 2.0s after that exec instant → dwell ≈ 2.0s.
+		const startTicks = uint64(140) // 140/100 = 1.4s after boot
+		oldStart := procStartTime
+		procStartTime = func(pid int) uint64 {
+			if pid == 1337 {
+				return startTicks
+			}
+			return 0
+		}
+		defer func() { procStartTime = oldStart }()
+
+		// exec instant = bootSecs + 1.4s; egress event 2.0s later.
+		execAt := time.Unix(bootSecs, 0).Add(1400 * time.Millisecond)
+		evTime := execAt.Add(2 * time.Second).UTC().Format(time.RFC3339Nano)
+
+		c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.x/payload", ExecID: "X", Pid: 1337}, cfg)
+		f := correlated(t, c.Process(tetragon.Event{Kind: "connect", ExecID: "X", Pid: 1337, Dst: "8.8.8.8", DstPort: 443, Time: evTime}, cfg))
+
+		if f.AutoMeta == nil {
+			t.Fatalf("correlated finding must carry AutoMeta: %+v", f)
+		}
+		if f.AutoMeta.DwellMs <= 0 {
+			t.Errorf("DwellMs should be > 0 when computable, got %d", f.AutoMeta.DwellMs)
+		}
+		// Expect ~2000ms (allow a small slop for the integer tick conversion).
+		if f.AutoMeta.DwellMs < 1900 || f.AutoMeta.DwellMs > 2100 {
+			t.Errorf("DwellMs=%d, want ~2000ms", f.AutoMeta.DwellMs)
+		}
+		dv, ok := dwellLine(f.Related)
+		if !ok {
+			t.Fatalf("want exactly one human-readable dwell= related line: %v", f.Related)
+		}
+		// Human-readable: 2.0s is rendered in seconds with an "s" suffix.
+		if !strings.HasSuffix(dv, "s") || strings.HasSuffix(dv, "ms") {
+			t.Errorf("dwell= should be human seconds (e.g. 2.0s), got %q", dv)
+		}
+		if dv != humanDur(f.AutoMeta.DwellMs) {
+			t.Errorf("dwell= line %q should match humanDur(%d)=%q", dv, f.AutoMeta.DwellMs, humanDur(f.AutoMeta.DwellMs))
+		}
+	})
+
+	t.Run("honest-omit when StartTime unavailable", func(t *testing.T) {
+		cl := newClock()
+		c := New(0, time.Hour, cl.now)
+
+		// /proc unreadable at capture → StartTime 0. The dwell is uncomputable.
+		oldStart := procStartTime
+		procStartTime = func(pid int) uint64 { return 0 }
+		defer func() { procStartTime = oldStart }()
+
+		evTime := time.Unix(bootSecs, 0).Add(5 * time.Second).UTC().Format(time.RFC3339Nano)
+		c.Process(tetragon.Event{Kind: "exec", Binary: "/tmp/.x/payload", ExecID: "X", Pid: 1337}, cfg)
+		f := correlated(t, c.Process(tetragon.Event{Kind: "connect", ExecID: "X", Pid: 1337, Dst: "8.8.8.8", DstPort: 443, Time: evTime}, cfg))
+
+		if f.AutoMeta == nil {
+			t.Fatalf("correlated finding must still carry AutoMeta: %+v", f)
+		}
+		if f.AutoMeta.DwellMs != 0 {
+			t.Errorf("DwellMs must be 0 when StartTime is unavailable, got %d", f.AutoMeta.DwellMs)
+		}
+		if _, ok := dwellLine(f.Related); ok {
+			t.Errorf("no dwell= line must be appended when uncomputable: %v", f.Related)
+		}
+	})
+}
+
+// computeDwellMs and humanDur: the conversion and the honest guards (zero
+// inputs, negative/absurd deltas omit; sane deltas compute), and humanDur's
+// unit boundaries. Pure-function coverage independent of the correlation path.
+func TestComputeDwellAndHumanDur(t *testing.T) {
+	oldBoot := bootEpoch
+	bootEpoch = func() (int64, bool) { return 1_000_000, true }
+	defer func() { bootEpoch = oldBoot }()
+
+	exec := time.Unix(1_000_000, 0).Add(150 * time.Millisecond) // 15 ticks after boot
+
+	// Computable: egress 340ms after exec.
+	if ms, ok := computeDwellMs(15, exec.Add(340*time.Millisecond)); !ok || ms < 330 || ms > 350 {
+		t.Errorf("computeDwellMs sane case = (%d,%v), want ~340ms,true", ms, ok)
+	}
+	// StartTime 0 → uncomputable.
+	if _, ok := computeDwellMs(0, exec); ok {
+		t.Error("computeDwellMs with StartTime 0 must be uncomputable")
+	}
+	// Zero event time → uncomputable.
+	if _, ok := computeDwellMs(15, time.Time{}); ok {
+		t.Error("computeDwellMs with zero detectedAt must be uncomputable")
+	}
+	// Negative delta (egress BEFORE exec, e.g. clock skew) → omit.
+	if _, ok := computeDwellMs(15, exec.Add(-time.Second)); ok {
+		t.Error("computeDwellMs with a negative delta must be omitted")
+	}
+	// Absurd delta (> maxDwell) → omit.
+	if _, ok := computeDwellMs(15, exec.Add(maxDwell+time.Hour)); ok {
+		t.Error("computeDwellMs with an absurd delta must be omitted")
+	}
+	// bootEpoch failure → omit (fail closed).
+	bootEpoch = func() (int64, bool) { return 0, false }
+	if _, ok := computeDwellMs(15, exec); ok {
+		t.Error("computeDwellMs must omit when bootEpoch fails")
+	}
+
+	// humanDur unit boundaries.
+	for _, tc := range []struct {
+		ms   int64
+		want string
+	}{
+		{340, "340ms"},
+		{999, "999ms"},
+		{1400, "1.4s"},
+		{59_000, "59.0s"},
+		{90_000, "1.5m"},
+		{3600_000, "1.0h"},
+	} {
+		if got := humanDur(tc.ms); got != tc.want {
+			t.Errorf("humanDur(%d)=%q want %q", tc.ms, got, tc.want)
+		}
+	}
+}
+
+// realBootEpoch reads "btime" from /proc/stat under procStatRoot (a fabricated
+// tree in tests) and fails closed on a missing/garbled file.
+func TestRealBootEpoch(t *testing.T) {
+	root := t.TempDir()
+	old := procStatRoot
+	procStatRoot = root
+	defer func() { procStatRoot = old }()
+
+	if err := os.WriteFile(root+"/stat", []byte("cpu 1 2 3\nbtime 1750000000\nprocesses 99\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := realBootEpoch(); !ok || got != 1_750_000_000 {
+		t.Errorf("realBootEpoch = (%d,%v) want (1750000000,true)", got, ok)
+	}
+
+	// Missing btime line → fail closed.
+	if err := os.WriteFile(root+"/stat", []byte("cpu 1 2 3\nprocesses 99\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := realBootEpoch(); ok {
+		t.Error("realBootEpoch must fail closed when btime is absent")
+	}
+
+	// Absent file → fail closed.
+	procStatRoot = root + "/does-not-exist"
+	if _, ok := realBootEpoch(); ok {
+		t.Error("realBootEpoch must fail closed when /proc/stat is unreadable")
+	}
+}
+
 // relatedHas is a test helper mirroring the bridge's predicate.
 func relatedHas(related []string, s string) bool {
 	for _, r := range related {
