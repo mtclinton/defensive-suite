@@ -106,6 +106,11 @@ soak-start:
 soak-report:
 	@./validation/soak-report.sh
 
+## soak-attest — turn a finished soak into the machine-checked arming attestation (no root)
+##   e.g. make soak-attest FLAGS="--host-class workstation"   (see docs/PHASE4_FP_SOAK.md §7)
+soak-attest:
+	@./validation/soak-attest.sh $(FLAGS)
+
 ## soak-stop — stop the soak (keeps collector data; --unload via FLAGS to drop the observe policy)
 soak-stop:
 	@sudo ./validation/soak-stop.sh $(FLAGS)

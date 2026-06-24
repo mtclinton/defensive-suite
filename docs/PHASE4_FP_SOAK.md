@@ -194,9 +194,21 @@ Do **not** proceed to the execution increment / `canary` until **all** hold:
       authenticated gRPC/socket export with peer auth is a precondition for arming, **not**
       later hardening.
 
-Only then build the **execution increment** (responder lifecycle refactor + per-action
-arming + reverse actuators + console push + fd-quarantine) behind `canary`, and start at the
-narrowest live action.
+**Produce the attestation** the arm gate machine-checks: `./validation/soak-attest.sh
+--host-class <class>` (also `make soak-attest FLAGS="--host-class <class>"`) turns the
+finished soak into the `dsuite.soak.attestation/v1` artifact — it derives `duration_days`
+and the candidate count from the **real soak data**, refuses to fabricate a pass (every
+candidate is a blocking FP unless you attest it a confirmed true positive, `--true-positive
+N --reviewed`), and self-checks against the exact gate rules. Point
+`AGENT_AUTORESPONSE_SOAK_ATTESTED` + `AGENT_AUTORESPONSE_HOST_CLASS` at it.
+
+The **execution increment is already BUILT** — gated and runtime-inert (see
+[PHASE4_UNGATING.md](PHASE4_UNGATING.md)): the Bridge→Respond wire, the grace/veto queue,
+and the lockout watchdog + auto-rollback all exist behind unit tests. But even a **passing
+attestation does NOT arm** anything in this build: `canary`/`armed` stay fatally refused
+because the **console-push channel** and the **authenticated Tetragon export** remain
+unbuilt, and the armed path must be **VM-validated**. Arm at the narrowest live action only
+after those land.
 
 ---
 
