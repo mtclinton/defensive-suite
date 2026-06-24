@@ -135,6 +135,17 @@ type Config struct {
 	// → canary/armed ineligible. The authenticated export itself is NOT implemented
 	// in this build (only its preflight gate is) — see the deferred list.
 	TetragonSource string
+
+	// AutoResponseHostClass is the arming host's class (e.g. "workstation"/"server",
+	// via AGENT_AUTORESPONSE_HOST_CLASS). The §3 soak attestation's host_class must
+	// MATCH it (a workstation soak does not attest a server arm). Empty ⇒ the
+	// attestation must also carry an empty host_class. Used only by the §3 validator
+	// when AutoResponseSoakAttested names a path.
+	AutoResponseHostClass string
+	// AutoResponseAttestationMaxAge bounds soak-attestation staleness (§3). Zero ⇒
+	// the validator's 30-day default. Set via AGENT_AUTORESPONSE_ATTESTATION_MAX_AGE
+	// (a Go duration, e.g. "720h").
+	AutoResponseAttestationMaxAge time.Duration
 }
 
 // Defaults returns a safe baseline for a single Linux workstation.
@@ -229,6 +240,10 @@ func Defaults() Config {
 		// canary/armed are REFUSED — auto-response cannot fire in this build.
 		AutoResponseSoakAttested: "",
 		TetragonSource:           "file",
+		// §3 validator inputs: no host-class asserted and the validator's default
+		// (30-day) staleness bound. With no attestation path these are unused.
+		AutoResponseHostClass:         "",
+		AutoResponseAttestationMaxAge: 0,
 	}
 }
 
@@ -319,6 +334,14 @@ func Load(getenv func(string) string) Config {
 	}
 	if v := getenv("AGENT_TETRAGON_SOURCE"); v != "" {
 		c.TetragonSource = strings.ToLower(strings.TrimSpace(v))
+	}
+	if v := getenv("AGENT_AUTORESPONSE_HOST_CLASS"); v != "" {
+		c.AutoResponseHostClass = strings.ToLower(strings.TrimSpace(v))
+	}
+	if v := getenv("AGENT_AUTORESPONSE_ATTESTATION_MAX_AGE"); v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil && d > 0 {
+			c.AutoResponseAttestationMaxAge = d
+		}
 	}
 	return c
 }

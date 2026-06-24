@@ -428,8 +428,20 @@ func cmdRun(args []string) int {
 func checkArmingGate(cfg config.Config) error {
 	requested := respond.ParseRequestedMode(cfg.AutoResponseMode)
 	in := respond.ArmingInputs{
-		SoakAttested:        cfg.AutoResponseSoakAttested != "" && fileExists(cfg.AutoResponseSoakAttested),
 		AuthenticatedExport: respond.AuthenticatedTetragonSource(cfg.TetragonSource),
+	}
+	// M6: wire the REAL §3 soak validator. When a soak-attestation PATH is
+	// configured, set SoakPassAttestationPath (+ HostClass + AttestationMaxAge) so
+	// armgate PARSES + VALIDATES the artifact (schema, duration, zero-FP, freshness,
+	// host-class, no trailing/decoy) instead of degrading to file-exists. The legacy
+	// existence-only SoakAttested bool is kept ONLY as a fallback for when NO path is
+	// configured (armgate honours it solely in that case).
+	if path := strings.TrimSpace(cfg.AutoResponseSoakAttested); path != "" {
+		in.SoakPassAttestationPath = path
+		in.HostClass = cfg.AutoResponseHostClass
+		in.AttestationMaxAge = cfg.AutoResponseAttestationMaxAge
+	} else {
+		in.SoakAttested = false // no path, no legacy artifact → unmet (fail-closed)
 	}
 	if missing := respond.ArmingPreconditions(requested, in); len(missing) > 0 {
 		return respond.ArmingRefusalError(requested, missing)

@@ -93,6 +93,12 @@ type Result struct {
 	DryRun bool   `json:"dry_run"`
 	Detail string `json:"detail,omitempty"`
 	Undo   string `json:"undo,omitempty"`
+	// QuarantineDst is the STRUCTURED quarantine destination a quarantine/
+	// quarantine-fd Execute moved the file to (the inverse's Target). It is set by
+	// the executor on a successful quarantine so the §4.6 inverse Request can be
+	// built from a machine-readable field, NOT parsed out of free-text Detail (M1).
+	// Empty for every non-quarantine action and for a dry-run (no move happened).
+	QuarantineDst string `json:"quarantine_dst,omitempty"`
 }
 
 // arg returns the trimmed Args value for k, or "".

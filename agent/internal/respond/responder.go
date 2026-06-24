@@ -216,6 +216,94 @@ func (r *Responder) Respond(req Request) Result {
 	return res
 }
 
+// isReverseAction reports whether action is one of the §4.6 REVERSE (un-contain)
+// actuators. Only these are eligible for the kill/rate-EXEMPT rescue path
+// (RespondRescue) — a forward containment action is never exempt.
+func isReverseAction(action string) bool {
+	switch action {
+	case ActionUnquarantine, ActionDeIsolate, ActionRestoreKey:
+		return true
+	default:
+		return false
+	}
+}
+
+// RespondRescue is the §4.3/§5 OPERATOR-RESCUE entrypoint for the lockout
+// watchdog's auto-undo. It runs a REVERSE action (Unquarantine/DeIsolate/
+// RestoreKey) BYPASSING BOTH the kill-switch AND the rate limiter, because §4.3/§5
+// decouples auto-undo from the kill-switch and the rate budget: the operator must
+// ALWAYS be un-lockable. The kill-switch stops FORWARD auto-actions, never the
+// operator-rescue un-contain; and the rate budget (exhausted by the preceding
+// containment burst) must not silently defeat the rescue.
+//
+// SAFETY (why this is not a hole): the bypass is SCOPED to reverse actions only.
+// RespondRescue REFUSES any non-reverse (forward/containment) action, so it can
+// never be used to run a kill/isolate/quarantine around the brakes. Forward
+// actions keep using Respond, where the kill-switch + rate limit still apply. The
+// reverse action still flows through Validate (pure guards) and the full audit
+// (intent + result), so it is attributable; only the two BRAKES are skipped.
+func (r *Responder) RespondRescue(req Request) Result {
+	now := r.clock()
+	dryRun := req.dryRun(r.DryRun)
+
+	// Scope the bypass: REFUSE a non-reverse action so the exempt path can never run
+	// a forward/containment action around the brakes.
+	if !isReverseAction(req.Action) {
+		res := r.refuse(req, dryRun, fmt.Sprintf("rescue path refuses non-reverse action %q (rescue is reverse-only: unquarantine/de-isolate/restore-key)", req.Action))
+		_ = r.Audit.Intent(now, req, dryRun)
+		_ = r.Audit.Result(now, req, res)
+		return res
+	}
+
+	// 1. Guardrails (pure) — still enforced; a refused reverse action is audited.
+	if err := r.Guards.Validate(req); err != nil {
+		res := Result{
+			OK:     false,
+			Action: req.Action,
+			Target: req.Target,
+			DryRun: dryRun,
+			Detail: "refused: " + err.Error(),
+		}
+		_ = r.Audit.Intent(now, req, dryRun)
+		_ = r.Audit.Result(now, req, res)
+		return res
+	}
+
+	// NOTE: NO kill-switch check and NO rate-limit consumption here — the deliberate
+	// §4.3/§5 decision (the operator must always be un-lockable).
+
+	// 2. Audit the intent BEFORE acting.
+	_ = r.Audit.Intent(now, req, dryRun)
+
+	// 3. Dry-run: return the plan, do not Execute (mirrors Respond).
+	if dryRun {
+		res := Result{
+			OK:     true,
+			Action: req.Action,
+			Target: req.Target,
+			DryRun: true,
+			Detail: "dry-run: would " + planned(req),
+			Undo:   plannedUndo(req),
+		}
+		_ = r.Audit.Result(r.clock(), req, res)
+		return res
+	}
+
+	// 4. Live: execute and audit the real outcome.
+	res, err := r.Exec.Execute(req)
+	res.Action, res.Target, res.DryRun = req.Action, req.Target, false
+	if err != nil {
+		res.OK = false
+		if res.Detail == "" {
+			res.Detail = "execute failed: " + err.Error()
+		} else {
+			res.Detail += " (error: " + err.Error() + ")"
+		}
+	}
+	_ = r.Audit.Result(r.clock(), req, res)
+	return res
+}
+
 // refuse builds a not-OK Result for a brake (kill-switch / rate limit) refusal,
 // carrying the EFFECTIVE dry-run flag (§4.4) so the audit reflects the live/dry
 // mode the request would have run in.

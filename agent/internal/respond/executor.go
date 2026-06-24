@@ -47,13 +47,20 @@ func (f *FakeExecutor) Execute(req Request) (Result, error) {
 	if f.ResultFn != nil {
 		return f.ResultFn(req), nil
 	}
-	return Result{
+	res := Result{
 		OK:     true,
 		Action: req.Action,
 		Target: req.Target,
 		Detail: "fake: " + req.String(),
 		Undo:   "fake-undo",
-	}, nil
+	}
+	// A quarantine forward returns a STRUCTURED destination so the grace queue can
+	// build the §4.6 inverse from a real Result field (M1), exactly as RealExecutor
+	// does. The synthetic dst is deterministic so tests can assert it.
+	if req.Action == ActionQuarantine || req.Action == ActionQuarantineFD {
+		res.QuarantineDst = "/var/lib/agentd/quarantine/fake-" + filepath.Base(req.Target)
+	}
+	return res, nil
 }
 
 // CallCount returns how many times Execute was invoked.
@@ -221,11 +228,12 @@ func (e *RealExecutor) quarantine(req Request) (Result, error) {
 	_ = os.Chmod(dst, 0o000)
 	undo := fmt.Sprintf("chattr -i %q && mv %q %q", dst, dst, src)
 	return Result{
-		OK:     true,
-		Action: req.Action,
-		Target: req.Target,
-		Detail: fmt.Sprintf("moved to %q (chattr +i, chmod 000)", dst),
-		Undo:   undo,
+		OK:            true,
+		Action:        req.Action,
+		Target:        req.Target,
+		Detail:        fmt.Sprintf("moved to %q (chattr +i, chmod 000)", dst),
+		Undo:          undo,
+		QuarantineDst: dst, // structured inverse Target (M1): the quarantine destination
 	}, nil
 }
 
@@ -403,11 +411,12 @@ func (e *RealExecutor) quarantineFD(req Request) (Result, error) {
 	// origin=src); the free-text string is the human-readable note.
 	undo := fmt.Sprintf("chattr -i %q && mv %q %q", dst, dst, src)
 	return Result{
-		OK:     true,
-		Action: req.Action,
-		Target: req.Target,
-		Detail: fmt.Sprintf("identity-bound quarantine of pid %d exe %q (inode %d) → %q (chattr +i, chmod 000)", pid, src, st.Ino, dst),
-		Undo:   undo,
+		OK:            true,
+		Action:        req.Action,
+		Target:        req.Target,
+		Detail:        fmt.Sprintf("identity-bound quarantine of pid %d exe %q (inode %d) → %q (chattr +i, chmod 000)", pid, src, st.Ino, dst),
+		Undo:          undo,
+		QuarantineDst: dst, // structured inverse Target (M1): the quarantine destination
 	}, nil
 }
 
@@ -418,6 +427,27 @@ func (e *RealExecutor) quarantineFD(req Request) (Result, error) {
 func (e *RealExecutor) unquarantine(req Request) (Result, error) {
 	dst := strings.TrimSpace(req.Target)
 	origin := strings.TrimSpace(req.arg("origin"))
+
+	// N5 idempotency: if the quarantine source (dst) is ALREADY ABSENT and the origin
+	// is already present, the restore already happened — a re-run (e.g. the rescue
+	// path retrying) is a SUCCESS, not a failure. We require the origin to actually be
+	// present so this never masks a genuinely-lost file. (Lstat both: a symlink at
+	// either counts as present and is handled by the guards below.) This is checked
+	// BEFORE the clobber guard so a benign re-run does not trip "origin already
+	// exists".
+	if _, derr := os.Lstat(dst); derr != nil && os.IsNotExist(derr) {
+		if _, oerr := os.Lstat(origin); oerr == nil {
+			return Result{
+				OK:     true,
+				Action: req.Action,
+				Target: req.Target,
+				Detail: fmt.Sprintf("quarantine source %q already absent and origin %q present — already restored, idempotent no-op", dst, origin),
+				Undo:   "",
+			}, nil
+		}
+		// dst absent AND origin absent: nothing to restore and nowhere it landed —
+		// fall through so the existing exists/symlink guards produce a precise error.
+	}
 
 	// FIX 2 (checked FIRST): refuse a SYMLINKED final component of the origin's
 	// PARENT — a pre-planted symlink (e.g. /staging/.ssh -> /root/.ssh, or the
@@ -481,6 +511,20 @@ func (e *RealExecutor) deIsolate(req Request) (Result, error) {
 		table = "dsuite_isolate"
 	}
 	if err := run("nft", "delete", "table", "inet", table); err != nil {
+		// N5 idempotency: deleting an ALREADY-ABSENT table is the desired end-state
+		// (egress is already un-isolated), NOT a failure. nft reports a missing table
+		// as "No such file or directory" / "does not exist"; treat that as SUCCESS so a
+		// re-run / a never-isolated host does not raise a spurious CRITICAL on the
+		// rescue path. Any OTHER nft error is still a real failure.
+		if isAbsentObjectErr(err) {
+			return Result{
+				OK:     true,
+				Action: req.Action,
+				Target: req.Target,
+				Detail: fmt.Sprintf("nftables table inet %s already absent (egress already un-isolated) — idempotent no-op", table),
+				Undo:   "",
+			}, nil
+		}
 		return Result{Action: req.Action, Target: req.Target}, fmt.Errorf("de-isolate: %w", err)
 	}
 	return Result{
@@ -490,6 +534,32 @@ func (e *RealExecutor) deIsolate(req Request) (Result, error) {
 		Detail: fmt.Sprintf("deleted nftables table inet %s (egress restored)", table),
 		Undo:   "", // its own inverse is to re-isolate
 	}, nil
+}
+
+// isAbsentObjectErr reports whether err is an OS/nft "the object is already gone"
+// error — the signal an idempotent reverse actuator treats as SUCCESS (the
+// reversal's end-state already holds). It matches the common nft/kernel phrasings
+// for a missing table/rule/file without coupling to a specific nft version.
+func isAbsentObjectErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, frag := range []string{
+		"no such file or directory",
+		"does not exist",
+		"no such table",
+		"not exist",
+		"enoent",
+	} {
+		if strings.Contains(msg, frag) {
+			return true
+		}
+	}
+	return false
 }
 
 // restoreKey is the §4.6 reverse of revoke-key: restore authorized_keys from its

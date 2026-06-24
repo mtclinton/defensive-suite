@@ -368,8 +368,11 @@ func TestCheckArmingGate(t *testing.T) {
 		if !strings.Contains(msg, "REFUSED") {
 			t.Errorf("mode %q refusal should say REFUSED: %q", m, msg)
 		}
-		if !strings.Contains(msg, "bridge→Respond") {
-			t.Errorf("mode %q refusal should name the missing bridge→Respond wire: %q", m, msg)
+		// The bridge→Respond wire, grace queue, and watchdog are BUILT this increment
+		// and no longer deferred. The refusal must instead name a genuinely-unbuilt
+		// rail (the authenticated Tetragon export). canary/armed stay refused.
+		if !strings.Contains(msg, "authenticated gRPC/socket Tetragon export") {
+			t.Errorf("mode %q refusal should name the unbuilt authenticated-export rail: %q", m, msg)
 		}
 	}
 }
@@ -391,13 +394,106 @@ func TestCheckArmingGateStillRefusesWithConfigGatesSatisfied(t *testing.T) {
 		t.Fatal("canary must STILL be refused even with config gates satisfied (deferred mechanisms unmet)")
 	}
 	msg := err.Error()
-	// The satisfied gates must NOT be in the list; the deferred ones must be.
+	// The satisfied gates must NOT be in the list; the unbuilt rails must be.
 	if strings.Contains(msg, "AGENT_AUTORESPONSE_SOAK_ATTESTED") || strings.Contains(msg, "AGENT_TETRAGON_SOURCE") {
 		t.Errorf("satisfied config gates should not be listed as missing: %q", msg)
 	}
-	if !strings.Contains(msg, "bridge→Respond") {
-		t.Errorf("the deferred bridge wire must still be listed: %q", msg)
+	// The two genuinely-unbuilt rails (console push + authenticated export) keep
+	// canary refused after this increment (the bridge wire / grace / watchdog are
+	// built and no longer deferred).
+	if !strings.Contains(msg, "console push") {
+		t.Errorf("the unbuilt console-push rail must still be listed: %q", msg)
 	}
+	if !strings.Contains(msg, "authenticated gRPC/socket Tetragon export") {
+		t.Errorf("the unbuilt authenticated-export rail must still be listed: %q", msg)
+	}
+}
+
+// TestCheckArmingGateRunsRealSoakValidator (M6) is the integration assertion that
+// the §3 validator is WIRED into the runtime arm gate — not degraded to file-exists.
+// A malformed / short / stale attestation must surface the §3 soak refusal REASON
+// in checkArmingGate's output (proving the validator ran), while the two deferred
+// rails keep canary refused (this does NOT un-gate).
+func TestCheckArmingGateRunsRealSoakValidator(t *testing.T) {
+	write := func(t *testing.T, content string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "soak.json")
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	gen := func(d time.Duration) string { return time.Now().Add(d).Format(time.RFC3339) }
+	valid := func() string {
+		return `{"schema":"dsuite.soak.attestation/v1","duration_days":21,` +
+			`"distinct_would_quarantine":0,"unexplained_fp":0,` +
+			`"generated_at":"` + gen(-3*24*time.Hour) + `","host_class":"workstation"}`
+	}
+
+	cases := []struct {
+		name    string
+		content string
+		want    string // a substring that proves the §3 validator (not file-exists) ran
+	}{
+		{"empty-object (all fields missing)", `{}`, "missing the required"},
+		{"malformed json", `{not json`, "unparseable"},
+		{"short duration", `{"schema":"dsuite.soak.attestation/v1","duration_days":3,` +
+			`"distinct_would_quarantine":0,"unexplained_fp":0,"generated_at":"` + gen(-3*24*time.Hour) +
+			`","host_class":"workstation"}`, "too short"},
+		{"stale", `{"schema":"dsuite.soak.attestation/v1","duration_days":21,` +
+			`"distinct_would_quarantine":0,"unexplained_fp":0,"generated_at":"` + gen(-90*24*time.Hour) +
+			`","host_class":"workstation"}`, "stale"},
+		{"future-dated", `{"schema":"dsuite.soak.attestation/v1","duration_days":21,` +
+			`"distinct_would_quarantine":0,"unexplained_fp":0,"generated_at":"` + gen(72*time.Hour) +
+			`","host_class":"workstation"}`, "FUTURE"},
+		{"trailing decoy object", valid() + "\n" + valid(), "trailing data"},
+		{"host-class mismatch", `{"schema":"dsuite.soak.attestation/v1","duration_days":21,` +
+			`"distinct_would_quarantine":0,"unexplained_fp":0,"generated_at":"` + gen(-3*24*time.Hour) +
+			`","host_class":"server"}`, "host_class"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := config.Defaults()
+			c.AutoResponseMode = "canary"
+			c.AutoResponseSoakAttested = write(t, tc.content)
+			c.AutoResponseHostClass = "workstation"
+			c.TetragonSource = "grpc" // authenticated export satisfied, isolating the soak gate
+			err := checkArmingGate(c)
+			if err == nil {
+				t.Fatal("canary must be REFUSED")
+			}
+			msg := err.Error()
+			// The §3 validator REASON must appear (proving it ran, not file-exists).
+			if !strings.Contains(msg, tc.want) {
+				t.Errorf("the §3 soak refusal reason %q must appear in the arming output:\n%s", tc.want, msg)
+			}
+			// And this does NOT un-gate: the deferred rails still keep canary refused.
+			if !strings.Contains(msg, "console push") || !strings.Contains(msg, "authenticated gRPC/socket Tetragon export") {
+				t.Errorf("the two deferred rails must STILL keep canary refused:\n%s", msg)
+			}
+		})
+	}
+
+	// A FULLY-VALID attestation makes the soak reason DISAPPEAR (the validator passed),
+	// yet canary is STILL refused by the two deferred rails — the gating invariant.
+	t.Run("valid attestation: soak passes but rails still refuse", func(t *testing.T) {
+		c := config.Defaults()
+		c.AutoResponseMode = "canary"
+		c.AutoResponseSoakAttested = write(t, valid())
+		c.AutoResponseHostClass = "workstation"
+		c.TetragonSource = "grpc"
+		err := checkArmingGate(c)
+		if err == nil {
+			t.Fatal("canary must STILL be refused even with a valid soak (gating invariant)")
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "FP-soak") {
+			t.Errorf("a VALID soak must not surface a soak refusal:\n%s", msg)
+		}
+		if !strings.Contains(msg, "console push") || !strings.Contains(msg, "authenticated gRPC/socket Tetragon export") {
+			t.Errorf("the deferred rails must keep canary refused:\n%s", msg)
+		}
+	})
 }
 
 // cmdPreflight returns non-zero for canary/armed (the arming gate), 0-or-2 for a

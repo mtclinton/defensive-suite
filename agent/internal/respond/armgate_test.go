@@ -33,9 +33,16 @@ func TestArmingPreconditionsCanaryArmedAlwaysRefused(t *testing.T) {
 				t.Errorf("mode %v missing list should enumerate %q; got:\n%s", m, want, joined)
 			}
 		}
-		// The bridge→Respond wire is the load-bearing un-gating; it must be named.
-		if !strings.Contains(joined, "bridge→Respond") {
-			t.Errorf("mode %v refusal must name the bridge→Respond un-gating as missing:\n%s", m, joined)
+		// The two GENUINELY-UNBUILT rails (console push + authenticated export) are
+		// the load-bearing runtime-inert guarantee in this build; they must be named.
+		// (The bridge→Respond wire, grace queue, and watchdog ARE built this
+		// increment and are no longer in the deferred list — see
+		// TestArmingStillRefusedInThisBuild for the runtime-inert assertion.)
+		if !strings.Contains(joined, "console push") {
+			t.Errorf("mode %v refusal must name the unbuilt console-push rail:\n%s", m, joined)
+		}
+		if !strings.Contains(joined, "authenticated gRPC/socket Tetragon export") {
+			t.Errorf("mode %v refusal must name the unbuilt authenticated-export rail:\n%s", m, joined)
 		}
 	}
 }

@@ -3,6 +3,7 @@ package respond
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -433,6 +434,71 @@ func TestRealDeIsolateDeletesTable(t *testing.T) {
 	joined := strings.Join(cmds, "\n")
 	if !strings.Contains(joined, "nft delete table inet dsuite_isolate") {
 		t.Errorf("de-isolate must delete the isolation table:\n%s", joined)
+	}
+}
+
+// N5 idempotency: deleting an ALREADY-ABSENT nft table is the desired end-state
+// (egress already un-isolated), so de-isolate returns OK (not a spurious CRITICAL).
+// The fake `nft` returns the kernel's "No such file or directory" for a missing
+// table; de-isolate must treat that as an idempotent success.
+func TestRealDeIsolateIdempotentOnAbsentTable(t *testing.T) {
+	orig := run
+	run = func(name string, args ...string) error {
+		return errors.New("nft delete table inet dsuite_isolate: exit status 1: Error: No such file or directory")
+	}
+	defer func() { run = orig }()
+
+	e := NewRealExecutor(Guards{})
+	res, err := e.deIsolate(Request{Action: ActionDeIsolate})
+	if err != nil {
+		t.Fatalf("de-isolate on an absent table must be an idempotent SUCCESS, got err: %v", err)
+	}
+	if !res.OK {
+		t.Errorf("de-isolate on an absent table must be OK (already un-isolated): %+v", res)
+	}
+	if !strings.Contains(res.Detail, "already absent") {
+		t.Errorf("the result should note the idempotent no-op: %q", res.Detail)
+	}
+
+	// CONTRAST: a DIFFERENT nft error is still a real failure.
+	run = func(name string, args ...string) error {
+		return errors.New("nft: Operation not permitted")
+	}
+	if _, err := e.deIsolate(Request{Action: ActionDeIsolate}); err == nil {
+		t.Error("a non-absent nft error must STILL be a failure, not swallowed as idempotent")
+	}
+}
+
+// N5 idempotency: re-running unquarantine when the source is already gone and the
+// origin is already restored is an idempotent SUCCESS (the rescue path may retry),
+// not a failure.
+func TestRealUnquarantineIdempotentWhenAlreadyRestored(t *testing.T) {
+	dir := t.TempDir()
+	qdir := filepath.Join(dir, "quarantine")
+	if err := os.MkdirAll(qdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(qdir, "123-payload") // intentionally NOT created (already moved)
+	origin := filepath.Join(dir, "origin", "payload")
+	if err := os.MkdirAll(filepath.Dir(origin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The origin is ALREADY present (a prior unquarantine restored it).
+	if err := os.WriteFile(origin, []byte("malware"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := run
+	run = func(name string, args ...string) error { return nil }
+	defer func() { run = orig }()
+
+	e := NewRealExecutor(reverseGuards())
+	res, err := e.unquarantine(Request{Action: ActionUnquarantine, Target: dst, Args: map[string]string{"origin": origin}})
+	if err != nil {
+		t.Fatalf("a re-run unquarantine (already restored) must be an idempotent SUCCESS, got err: %v", err)
+	}
+	if !res.OK || !strings.Contains(res.Detail, "already restored") {
+		t.Errorf("expected an idempotent no-op success, got %+v", res)
 	}
 }
 
