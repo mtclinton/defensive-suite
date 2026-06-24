@@ -97,6 +97,12 @@ console-keygen:
 	@echo "      is present; to build a signed AppImage locally, set createUpdaterArtifacts"
 	@echo "      true (or pass --config '{\"bundle\":{\"createUpdaterArtifacts\":true}}')."
 
+## deploy-shadow — turnkey SHADOW deployment for a real host: Tetragon + observe policy +
+##   install.sh + agentd MODE=shadow (survive-reboot; never acts). This IS the FP-soak,
+##   passively. e.g. make deploy-shadow FLAGS="--mgmt-subnets 100.64.0.0/10". Linux + root.
+deploy-shadow:
+	@sudo ./validation/deploy-shadow.sh $(FLAGS)
+
 ## soak-start — start the Phase 4 FP-soak (SHADOW mode; never acts). Linux + root.
 ##   Run on the host you want to measure, >=14d with real build/CI/dev. See docs/PHASE4_FP_SOAK.md.
 soak-start:
