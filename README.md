@@ -10,6 +10,14 @@ and then hides kernel-resident via an eBPF rootkit.
 Six composable tools, mostly Go with eBPF where it earns its place, plus a Python
 forensics path for the one problem that can't be solved from the live kernel.
 
+<p align="center">
+  <img src="docs/console.gif" width="840"
+       alt="defensive-suite console: the correlated C2 incident as a hero, click-to-drawer drill-down, the Findings / Tools / Threat-Model views, and the palette switcher">
+  <br><em>The console — a no-scroll app-shell that promotes the correlated exec→egress C2 finding
+  to a hero (lineage, ATT&CK, dwell-time, would-respond), with click-to-drawer drill-down,
+  per-tool posture, a threat→defense map, and a palette switcher.</em>
+</p>
+
 ## Collector & dashboard
 
 The [`collector/`](collector/) service is the aggregation keystone: every tool POSTs its
