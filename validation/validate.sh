@@ -362,7 +362,11 @@ fi
 # resident — unlike SIGKILL, the load never happens.
 if [ "$WITH_OVERRIDE" = 1 ]; then
   say "stage 3b — Override: the non-allow-listed load must be BLOCKED (-EPERM), not just killed"
-  if "$BIN/agentd" preflight 2>/dev/null | grep -E '^ok[[:space:]]' | grep -q 'kprobe-override'; then
+  # Capture preflight FIRST: it exits non-zero when not fully ready (e.g. fapolicyd
+  # absent), which under `set -o pipefail` would poison a `preflight | grep` pipe and
+  # FALSELY fail this gate on any host lacking fapolicyd (stock 22.04/24.04, the runner).
+  pf_out="$("$BIN/agentd" preflight 2>/dev/null || true)"
+  if printf '%s\n' "$pf_out" | grep -E '^ok[[:space:]]' | grep -q 'kprobe-override'; then
     info "preflight reports CONFIG_BPF_KPROBE_OVERRIDE present — proceeding with the Override variant"
     tetra tracingpolicy delete dsuite-enforce 2>/dev/null  # swap Sigkill → Override (avoid double-hook)
 
@@ -375,7 +379,9 @@ metadata:
   name: dsuite-enforce-override
 spec:
   kprobes:
-    - call: "bpf_check"  # portable BPF-load hook (see note): security_bpf_prog_load only exists on >=6.10; bpf_check (the verifier, fired on every prog load) is present on all supported kernels and is in agentd BPFLoadFuncs
+    # Override needs a security_/syscall hook (bpf_check is rejected); security_bpf_prog_load
+    # exists only on kernel >=6.10. Mirrors agent/deploy/enforce/dsuite-enforce-override.yaml.
+    - call: "security_bpf_prog_load"
       syscall: false
       selectors:
         - matchBinaries:
@@ -390,7 +396,16 @@ HEAD
 TAIL
     } > "$OVERRIDE_YAML"
 
-    tetra tracingpolicy add "$OVERRIDE_YAML" || die "failed to load the override enforce policy"
+    # Try-load-and-skip: CONFIG_BPF_KPROBE_OVERRIDE=y is necessary but NOT sufficient — the
+    # Override policy also needs security_bpf_prog_load (kernel >=6.10) and fmod_ret/direct-
+    # calls (arm64 >=6.0). If it can't load here, skip 3b honestly rather than abort; SIGKILL
+    # (stage 3) already proved enforcement on this kernel.
+    if ! tetra tracingpolicy add "$OVERRIDE_YAML" 2>"$WORK/override-load.err"; then
+      printf '  %s[SKIP]%s stage 3b — the Override policy did not load on this kernel (%s)\n' "$c_y" "$c_0" "$(uname -r)"
+      info "$(tr '\n' ' ' < "$WORK/override-load.err")"
+      info "Override (true -EPERM block) needs security_bpf_prog_load (>=6.10) + fmod_ret/direct-calls (arm64 >=6.0); the SIGKILL path (stage 3, PASSED) is the enforcement here."
+      tetra tracingpolicy delete dsuite-enforce-override 2>/dev/null  # drop the load_error remnant
+    else
     info "override policy loaded (allow-list: ${ALLOW[*]})"
     sleep 1
     # Baseline AFTER the override policy (and its own eBPF program) is resident, so
@@ -417,6 +432,7 @@ TAIL
       fail "an extra eBPF program is resident ($PROG_BEFORE_OV → $PROG_AFTER_OV) — Override did not block the load"
     fi
     tetra tracingpolicy delete dsuite-enforce-override 2>/dev/null && info "removed override policy"
+    fi
   else
     printf '  %s[SKIP]%s --with-override requested but preflight does not report CONFIG_BPF_KPROBE_OVERRIDE\n' "$c_y" "$c_0"
     info "this kernel cannot do the Override block; the Sigkill variant (stage 3) is the fallback. Skipping 3b."

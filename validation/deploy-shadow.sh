@@ -25,6 +25,9 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TLOG="/var/log/tetragon/tetragon.log"
 MGMT=""; SKIP_TG=0; DRY=0
+# The official Go install lives at /usr/local/go/bin, which is usually NOT on root's
+# sudo secure_path — so install.sh's `go build` would fail "missing go" under sudo.
+export PATH="/usr/local/go/bin:$PATH"
 c_g=$'\e[32m'; c_r=$'\e[31m'; c_y=$'\e[33m'; c_0=$'\e[0m'
 step(){ printf '\n%s== %s ==%s\n' "$c_y" "$*" "$c_0"; }
 info(){ printf '    %s\n' "$*"; }

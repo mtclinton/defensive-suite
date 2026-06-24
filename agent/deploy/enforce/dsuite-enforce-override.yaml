@@ -98,7 +98,13 @@ spec:
     #   (-1 == -EPERM == "Operation not permitted". Use a different negative errno
     #    only if you have a specific reason; -EPERM is the natural "denied" code.)
     # -------------------------------------------------------------------------
-    - call: "bpf_check"  # portable BPF-load hook (see note): security_bpf_prog_load only exists on >=6.10; bpf_check (the verifier, fired on every prog load) is present on all supported kernels and is in agentd BPFLoadFuncs
+    # Override REQUIRES a syscall or security_ hook — a plain kprobe like bpf_check is
+    # REJECTED ("override action can be used only with syscalls and security_ hooks"). So
+    # this policy keeps the security_ hook security_bpf_prog_load, which exists only on
+    # kernel >=6.10 (and Override also needs fmod_ret/direct-calls — arm64 >=6.0). Override
+    # is the OPTIONAL true-block enhancement; on older kernels the portable SIGKILL policy
+    # (dsuite-enforce.yaml, hooking bpf_check) is the enforcement path instead.
+    - call: "security_bpf_prog_load"
       syscall: false
       selectors:
         - matchBinaries:
