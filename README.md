@@ -38,6 +38,14 @@ tool / severity / ATT&CK technique, the threat-model → defense map, and per-to
 The public page shows **sample** data; served by the collector it shows your **real**
 findings (which never leave your network). No build step.
 
+<p align="center">
+  <img src="docs/console-live.png" width="840"
+       alt="the console serving real findings from a live agentd in shadow mode">
+  <br><em>Live, not mocked: the console served by a running <code>agentd</code> in shadow
+  mode on a 6.8 kernel, showing real Tetragon detections — an exec→egress C2 correlation
+  (<code>/tmp/.cache/.x → 1.1.1.1:80</code>, resolved by exec_id) promoted to the hero.</em>
+</p>
+
 ## The tools
 
 | Tool | Job | Primary stack |

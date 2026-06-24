@@ -33,9 +33,12 @@ related  = [ "mode=shadow", "would_action=quarantine",
              "dst=<ip:port>", "<gate outcomes>" ]
 ```
 
-`would_action=alert-only` shadow findings (correlated events the policy would *not* act on)
-are emitted too — they are **not** counted in the FP metric; only `would_action=quarantine`
-is, because quarantine is the only action that ever goes live in v1.
+`would_action=alert-only` decisions (correlated events the policy would *not* act on — e.g.
+a bare staging-dir exec, T1059) are **kept quiet in this build**: `emit()` returns nil for
+them to avoid soak noise (emitting them is a deferred increment). So only
+`would_action=quarantine` shadow findings appear — which is also the only action counted in
+the FP metric, because quarantine is the only action that ever goes live. (A T1620 *fileless*
+base is what routes a decision to `quarantine`; a plain staging exec stays alert-only/quiet.)
 
 A `realtime.autoresponse.throttled` finding means the auto-only rate budget tripped — a
 flood/abuse signal, also worth watching (it must **never** disable manual response; that is
