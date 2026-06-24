@@ -290,7 +290,7 @@ metadata:
   name: dsuite-enforce
 spec:
   kprobes:
-    - call: "security_bpf_prog_load"
+    - call: "bpf_check"  # portable BPF-load hook (see note): security_bpf_prog_load only exists on >=6.10; bpf_check (the verifier, fired on every prog load) is present on all supported kernels and is in agentd BPFLoadFuncs
       syscall: false
       selectors:
         - matchBinaries:
@@ -375,7 +375,7 @@ metadata:
   name: dsuite-enforce-override
 spec:
   kprobes:
-    - call: "security_bpf_prog_load"
+    - call: "bpf_check"  # portable BPF-load hook (see note): security_bpf_prog_load only exists on >=6.10; bpf_check (the verifier, fired on every prog load) is present on all supported kernels and is in agentd BPFLoadFuncs
       syscall: false
       selectors:
         - matchBinaries:

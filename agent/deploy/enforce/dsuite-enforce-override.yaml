@@ -98,7 +98,7 @@ spec:
     #   (-1 == -EPERM == "Operation not permitted". Use a different negative errno
     #    only if you have a specific reason; -EPERM is the natural "denied" code.)
     # -------------------------------------------------------------------------
-    - call: "security_bpf_prog_load"
+    - call: "bpf_check"  # portable BPF-load hook (see note): security_bpf_prog_load only exists on >=6.10; bpf_check (the verifier, fired on every prog load) is present on all supported kernels and is in agentd BPFLoadFuncs
       syscall: false
       selectors:
         - matchBinaries:
