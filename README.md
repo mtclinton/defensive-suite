@@ -39,11 +39,13 @@ The public page shows **sample** data; served by the collector it shows your **r
 findings (which never leave your network). No build step.
 
 <p align="center">
-  <img src="docs/console-live.png" width="840"
-       alt="the console serving real findings from a live agentd in shadow mode">
-  <br><em>Live, not mocked: the console served by a running <code>agentd</code> in shadow
-  mode on a 6.8 kernel, showing real Tetragon detections — an exec→egress C2 correlation
-  (<code>/tmp/.cache/.x → 1.1.1.1:80</code>, resolved by exec_id) promoted to the hero.</em>
+  <img src="docs/attack.gif" width="840"
+       alt="live attack to detect: the console goes from CLEAN to a CRITICAL C2 incident as the exec to egress correlation fires">
+  <br><em>Live attack → detect on a real 6.8 kernel (not mocked): a staging-dir exec is at
+  first a faint signal (posture <code>CLEAN</code>); as eBPF loads accumulate and the process
+  connects out, <code>agentd</code> fuses exec→egress by <code>exec_id</code> and the console
+  <strong>ignites to a CRITICAL C2 incident</strong> — <code>/tmp/.cache/.x → 1.1.1.1:80</code>,
+  T1071. Captured from a live shadow deploy in a VM.</em>
 </p>
 
 ## The tools
